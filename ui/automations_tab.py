@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QShowEvent
 from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -39,11 +40,31 @@ ACTION_DESCRIPTIONS = {
 }
 
 
+def _collect_rule_names(rules_dir: Path) -> list[str]:
+    """Union of all rule_name values from rules/*.json (Parser rule sets)."""
+    names: set[str] = set()
+    for path in sorted(rules_dir.glob("*.json")):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, list):
+            continue
+        for item in data:
+            if isinstance(item, dict):
+                rn = item.get("rule_name")
+                if rn is not None and str(rn).strip():
+                    names.add(str(rn).strip())
+    return sorted(names)
+
+
 class AutomationsTab(QWidget):
-    def __init__(self, automations_dir: Path, targets_dir: Path):
+    def __init__(self, automations_dir: Path, targets_dir: Path, rules_dir: Path):
         super().__init__()
         self.automations_dir = automations_dir
         self.targets_dir = targets_dir
+        self.rules_dir = rules_dir
         self._current_file: Path | None = None
         self._automation: dict = {"name": "", "steps": []}
         self._build_ui()
@@ -131,23 +152,39 @@ class AutomationsTab(QWidget):
         editor_heading.setObjectName("heading")
         rl.addWidget(editor_heading)
 
-        rl.addWidget(QLabel("Action Type"))
+        self._step_editor_placeholder = QLabel(
+            "Select a step in the list to edit its settings."
+        )
+        self._step_editor_placeholder.setWordWrap(True)
+        self._step_editor_placeholder.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        )
+        rl.addWidget(self._step_editor_placeholder)
+
+        self._step_editor_form = QWidget()
+        form_layout = QVBoxLayout(self._step_editor_form)
+        form_layout.setContentsMargins(0, 0, 0, 0)
+
+        form_layout.addWidget(QLabel("Action Type"))
         self.combo_action = QComboBox()
         for a in ACTION_TYPES:
             self.combo_action.addItem(f"{a}  —  {ACTION_DESCRIPTIONS[a]}", a)
         self.combo_action.currentIndexChanged.connect(self._on_action_type_changed)
-        rl.addWidget(self.combo_action)
+        form_layout.addWidget(self.combo_action)
 
         self.editor_stack = QStackedWidget()
         self._build_editors()
-        rl.addWidget(self.editor_stack)
+        form_layout.addWidget(self.editor_stack)
 
         btn_save_step = QPushButton("Save Step")
         btn_save_step.setObjectName("primary")
         btn_save_step.clicked.connect(self._save_step)
-        rl.addWidget(btn_save_step)
+        form_layout.addWidget(btn_save_step)
+
+        rl.addWidget(self._step_editor_form)
 
         rl.addStretch()
+        self._set_step_editor_visible(False)
         splitter.addWidget(right)
         splitter.setSizes([200, 280, 340])
 
@@ -200,13 +237,14 @@ class AutomationsTab(QWidget):
         offset_row.addWidget(spin_oy)
         layout.addLayout(offset_row)
 
-        layout.addWidget(QLabel("Loop Variable (optional — repeat per parsed record)"))
-        loop_edit = QLineEdit()
-        loop_edit.setPlaceholderText("e.g. customer_name")
-        loop_edit.setToolTip(
-            "If set, the runner loops over this variable's values each run"
+        layout.addWidget(QLabel("Loop Variable (optional — one click per value)"))
+        loop_combo = QComboBox()
+        loop_combo.setToolTip(
+            "Parser rule names from rules/*.json. If the field has several values "
+            "(comma/newline-separated, or a list), this step clicks once per value. "
+            "Leave empty for a single click. Unknown names can be added when loading old automations."
         )
-        layout.addWidget(loop_edit)
+        layout.addWidget(loop_combo)
 
         layout.addStretch()
         return {
@@ -215,7 +253,7 @@ class AutomationsTab(QWidget):
             "confidence": spin_conf,
             "offset_x": spin_ox,
             "offset_y": spin_oy,
-            "loop_variable": loop_edit,
+            "loop_variable": loop_combo,
         }
 
     def _make_wait_editor(self) -> dict:
@@ -248,8 +286,27 @@ class AutomationsTab(QWidget):
         edit.setPlaceholderText("{{customer_name}}")
         layout.addWidget(edit)
 
+        layout.addWidget(QLabel("Insert variable"))
+        var_combo = QComboBox()
+        var_combo.setToolTip(
+            "Choose a Parser rule name to insert {{rule_name}} at the text cursor."
+        )
+
+        def on_var_activated(index: int) -> None:
+            if index <= 0:
+                return
+            name = var_combo.itemText(index)
+            pos = edit.cursorPosition()
+            token = f"{{{{{name}}}}}"
+            edit.insert(token)
+            edit.setCursorPosition(pos + len(token))
+            var_combo.setCurrentIndex(0)
+
+        var_combo.activated.connect(on_var_activated)
+        layout.addWidget(var_combo)
+
         layout.addStretch()
-        return {"widget": w, "value": edit}
+        return {"widget": w, "value": edit, "variable_combo": var_combo}
 
     def _make_hotkey_editor(self) -> dict:
         w = QWidget()
@@ -270,6 +327,30 @@ class AutomationsTab(QWidget):
             combo.clear()
             for f in sorted(self.targets_dir.glob("*.png")):
                 combo.addItem(f.name)
+
+    def _refresh_rule_variables(self):
+        names = _collect_rule_names(self.rules_dir)
+        for combo in (
+            self._editor_click["loop_variable"],
+            self._editor_type["variable_combo"],
+        ):
+            prev = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("")
+            for n in names:
+                combo.addItem(n)
+            combo.blockSignals(False)
+            _set_combo(combo, prev)
+
+    def showEvent(self, event: QShowEvent):
+        super().showEvent(event)
+        self._refresh_targets()
+        self._refresh_rule_variables()
+        row = self.step_list.currentRow()
+        steps = self._automation.get("steps", [])
+        if 0 <= row < len(steps):
+            self._load_step_into_editor(steps[row])
 
     # --- Automation file management ---
 
@@ -341,16 +422,21 @@ class AutomationsTab(QWidget):
 
     # --- Step list ---
 
+    def _set_step_editor_visible(self, visible: bool):
+        self._step_editor_form.setVisible(visible)
+        self._step_editor_placeholder.setVisible(not visible)
+
     def _refresh_step_list(self):
         self.step_list.clear()
         for step in self._automation.get("steps", []):
             self.step_list.addItem(self._step_summary(step))
+        self._on_step_selected(self.step_list.currentRow())
 
     @staticmethod
     def _step_summary(step: dict) -> str:
         action = step.get("action", "?")
         if action == "click_image":
-            ox, oy = step.get("offset_x", 0), step.get("offset_y", 0)
+            ox, oy = step.get("offset_x", 0), -step.get("offset_y", 0)
             offset = f" +({ox},{oy})" if ox or oy else ""
             loop = step.get("loop_variable", "")
             loop_tag = f" [loop:{loop}]" if loop else ""
@@ -366,7 +452,9 @@ class AutomationsTab(QWidget):
 
     def _on_step_selected(self, row: int):
         steps = self._automation.get("steps", [])
-        if row < 0 or row >= len(steps):
+        valid = 0 <= row < len(steps)
+        self._set_step_editor_visible(valid)
+        if not valid:
             return
         step = steps[row]
         action = step.get("action", "click_image")
@@ -381,8 +469,12 @@ class AutomationsTab(QWidget):
             _set_combo(self._editor_click["target"], step.get("target", ""))
             self._editor_click["confidence"].setValue(step.get("confidence", 0.85))
             self._editor_click["offset_x"].setValue(int(step.get("offset_x", 0)))
-            self._editor_click["offset_y"].setValue(int(step.get("offset_y", 0)))
-            self._editor_click["loop_variable"].setText(step.get("loop_variable", ""))
+            # Flip Y sign so editor direction matches expected click direction.
+            self._editor_click["offset_y"].setValue(-int(step.get("offset_y", 0)))
+            _set_combo(
+                self._editor_click["loop_variable"],
+                step.get("loop_variable", ""),
+            )
         elif action == "wait_for_image":
             _set_combo(self._editor_wait["target"], step.get("target", ""))
             self._editor_wait["confidence"].setValue(step.get("confidence", 0.85))
@@ -448,8 +540,9 @@ class AutomationsTab(QWidget):
             step["target"] = self._editor_click["target"].currentText()
             step["confidence"] = self._editor_click["confidence"].value()
             step["offset_x"] = self._editor_click["offset_x"].value()
-            step["offset_y"] = self._editor_click["offset_y"].value()
-            loop_var = self._editor_click["loop_variable"].text().strip()
+            # Flip Y sign on save so the stored offset matches the runner.
+            step["offset_y"] = -self._editor_click["offset_y"].value()
+            loop_var = self._editor_click["loop_variable"].currentText().strip()
             if loop_var:
                 step["loop_variable"] = loop_var
         elif action == "wait_for_image":

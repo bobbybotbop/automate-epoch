@@ -3,8 +3,11 @@
   "steps": [
     {
       "action": "click_image",
-      "target": "title.png",
-      "confidence": 0.85
+      "target": "title2.png",
+      "confidence": 0.85,
+      "offset_x": 0,
+      "offset_y": 30,
+      "loop_variable": "customer_name"
     }
   ]
 }

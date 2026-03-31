@@ -36,6 +36,25 @@ def _ensure_venv() -> None:
 
 _ensure_venv()
 
+def _silence_known_qt_warnings() -> None:
+    # Suppress noisy (but non-fatal) Qt Windows DPI warnings like:
+    # "qt.qpa.window: SetProcessDpiAwarenessContext() failed: Access is denied."
+    #
+    # Must be set before importing PyQt6 so Qt picks it up during initialization.
+    rule = "qt.qpa.window.warning=false"
+    existing = os.environ.get("QT_LOGGING_RULES", "").strip()
+    if not existing:
+        os.environ["QT_LOGGING_RULES"] = rule
+        return
+
+    parts = [p.strip() for p in existing.split(";") if p.strip()]
+    if rule not in parts:
+        parts.append(rule)
+        os.environ["QT_LOGGING_RULES"] = ";".join(parts)
+
+
+_silence_known_qt_warnings()
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
@@ -48,6 +67,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ui.automations_tab import AutomationsTab
+from ui.import_export_tab import ImportExportTab
 from ui.parser_tab import ParserTab
 from ui.runner_tab import RunnerTab
 from ui.targets_tab import TargetsTab
@@ -255,14 +275,18 @@ class FlowDeskWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
 
         self.parser_tab = ParserTab(RULES_DIR)
-        self.automations_tab = AutomationsTab(AUTOMATIONS_DIR, TARGETS_DIR)
+        self.automations_tab = AutomationsTab(
+            AUTOMATIONS_DIR, TARGETS_DIR, RULES_DIR
+        )
         self.targets_tab = TargetsTab(TARGETS_DIR, parent_window=self)
         self.runner_tab = RunnerTab(AUTOMATIONS_DIR, RULES_DIR, TARGETS_DIR, LOGS_DIR)
+        self.import_export_tab = ImportExportTab(AUTOMATIONS_DIR)
 
         self.tabs.addTab(self.parser_tab, "Parser")
         self.tabs.addTab(self.automations_tab, "Automations")
         self.tabs.addTab(self.targets_tab, "Targets")
         self.tabs.addTab(self.runner_tab, "Runner")
+        self.tabs.addTab(self.import_export_tab, "Import/Export")
 
         self._setup_emergency_stop()
         self._setup_tray_icon()

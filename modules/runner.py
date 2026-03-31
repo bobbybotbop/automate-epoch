@@ -106,19 +106,7 @@ class AutomationRunner(QThread):
 
         try:
             if action == "click_image":
-                target = self._resolve_target(step.get("target", ""))
-                conf = self._get_confidence(step)
-                ox = int(step.get("offset_x", 0))
-                oy = int(step.get("offset_y", 0))
-                screen.click_image(
-                    target,
-                    confidence=conf,
-                    timeout=step.get("timeout", 10),
-                    offset_x=ox,
-                    offset_y=oy,
-                )
-                suffix = f" offset({ox},{oy})" if ox or oy else ""
-                return "ok", f"clicked {Path(target).name}{suffix}"
+                return self._execute_click_image(step, record)
 
             elif action == "type_value":
                 value = self._inject_variables(step.get("value", ""), record)
@@ -143,6 +131,88 @@ class AutomationRunner(QThread):
             return "fail", str(e)
         except Exception as e:
             return "fail", f"{type(e).__name__}: {e}"
+
+    def _execute_click_image(self, step: dict, record: dict) -> tuple[str, str]:
+        """Locate target and click; repeat once per value if *loop_variable* is set."""
+        target = self._resolve_target(step.get("target", ""))
+        conf = self._get_confidence(step)
+        ox = int(step.get("offset_x", 0))
+        oy = int(step.get("offset_y", 0))
+        timeout = step.get("timeout", 10)
+        suffix = f" offset({ox},{oy})" if ox or oy else ""
+
+        loop_name = self._normalize_loop_variable_name(step.get("loop_variable", ""))
+        if not loop_name:
+            screen.click_image(
+                target,
+                confidence=conf,
+                timeout=timeout,
+                offset_x=ox,
+                offset_y=oy,
+            )
+            return "ok", f"clicked {Path(target).name}{suffix}"
+
+        raw = record.get(loop_name)
+        values = self._values_for_loop_clicks(raw)
+        if not values:
+            return (
+                "skip",
+                f"loop_variable '{loop_name}' is empty or missing in this record",
+            )
+
+        last_msg = ""
+        for _ in values:
+            self._pause_event.wait()
+            if self._stop_flag:
+                return "ok", last_msg or f"stopped during loop ({Path(target).name})"
+            screen.click_image(
+                target,
+                confidence=conf,
+                timeout=timeout,
+                offset_x=ox,
+                offset_y=oy,
+            )
+            last_msg = f"clicked {Path(target).name}{suffix} x{len(values)}"
+
+        return "ok", f"clicked {Path(target).name}{suffix} ({len(values)} time(s) for '{loop_name}')"
+
+    @staticmethod
+    def _normalize_loop_variable_name(raw: str) -> str:
+        """Accept rule name or '{{rule_name}}' (same as type_value placeholders)."""
+        s = (raw or "").strip()
+        if not s:
+            return ""
+        m = re.fullmatch(r"\{\{(\w+)\}\}", s)
+        if m:
+            return m.group(1)
+        return s
+
+    @staticmethod
+    def _values_for_loop_clicks(raw: object) -> list[str]:
+        """Turn a record field into one entry per click (list/tuple or split string)."""
+        if raw is None:
+            return []
+        if isinstance(raw, (list, tuple)):
+            out = [str(x).strip() for x in raw if str(x).strip()]
+            return out
+        s = str(raw).strip()
+        if not s:
+            return []
+        for sep in ("\n", "\r\n"):
+            if sep in s:
+                parts = [p.strip() for p in s.replace("\r\n", "\n").split("\n")]
+                parts = [p for p in parts if p]
+                if len(parts) > 1:
+                    return parts
+        if "," in s:
+            parts = [p.strip() for p in s.split(",") if p.strip()]
+            if len(parts) > 1:
+                return parts
+        if ";" in s:
+            parts = [p.strip() for p in s.split(";") if p.strip()]
+            if len(parts) > 1:
+                return parts
+        return [s]
 
     def _resolve_target(self, target_name: str) -> str:
         path = self.targets_dir / target_name

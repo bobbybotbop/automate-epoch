@@ -20,27 +20,33 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+import pyautogui
+
 from modules.capture import start_capture
 from modules.screen import find_image_box
+from ui.toast import ToastType, show_toast
 
 META_FILENAME = "meta.json"
 
+POLL_INTERVAL_MS = 500
+TEST_TIMEOUT_MS = 15_000
+ANIM_SETTLE_MS = 350
+INPUT_WATCH_MS = 200
+PIXEL_TOLERANCE = 12
+CURSOR_MOVE_THRESHOLD = 5
 
-class TestResultOverlay(QWidget):
-    """Fullscreen translucent overlay showing whether a target was detected."""
 
-    DISPLAY_MS = 3000
+class DetectionOverlay(QWidget):
+    """Fullscreen click-through overlay that draws a highlight box.
 
-    def __init__(
-        self,
-        found: bool,
-        box: tuple[int, int, int, int] | None = None,
-        parent_window=None,
-    ):
+    All mouse and keyboard input passes through to the desktop thanks to
+    ``WindowTransparentForInput``.  Call :meth:`update_box` each poll tick;
+    pass *None* to clear the highlight.
+    """
+
+    def __init__(self) -> None:
         super().__init__()
-        self._found = found
-        self._box = box
-        self._parent_window = parent_window
+        self._box: tuple[int, int, int, int] | None = None
 
         screen = QApplication.primaryScreen()
         self._ratio = screen.devicePixelRatio() if screen else 1.0
@@ -49,37 +55,30 @@ class TestResultOverlay(QWidget):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
+            | Qt.WindowType.WindowTransparentForInput
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
         if screen:
             self.setGeometry(screen.geometry())
         self.showFullScreen()
-        self.activateWindow()
 
-        QTimer.singleShot(self.DISPLAY_MS, self._dismiss)
-
-    # -- painting ----------------------------------------------------------
+    def update_box(self, box: tuple[int, int, int, int] | None) -> None:
+        self._box = box
+        self.update()
 
     def paintEvent(self, event) -> None:
+        if self._box is None:
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 60))
 
-        if self._found and self._box:
-            self._paint_found(painter)
-        else:
-            self._paint_not_found(painter)
-
-        painter.end()
-
-    def _paint_found(self, painter: QPainter) -> None:
         left, top, w, h = self._box
         r = self._ratio
         left, top, w, h = int(left / r), int(top / r), int(w / r), int(h / r)
 
-        pen = QPen(QColor(0, 220, 100), 3, Qt.PenStyle.SolidLine)
-        painter.setPen(pen)
+        painter.setPen(QPen(QColor(0, 220, 100), 3, Qt.PenStyle.SolidLine))
         painter.setBrush(QColor(0, 220, 100, 45))
         painter.drawRect(left, top, w, h)
 
@@ -88,36 +87,15 @@ class TestResultOverlay(QWidget):
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QColor(0, 220, 100))
-
         label_y = top - 10 if top > 30 else top + h + 20
         painter.drawText(left, label_y, "FOUND")
 
-    def _paint_not_found(self, painter: QPainter) -> None:
-        font = painter.font()
-        font.setPointSize(28)
-        font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(QColor(255, 80, 80))
-        painter.drawText(
-            self.rect(), Qt.AlignmentFlag.AlignCenter, "NOT FOUND"
-        )
+        painter.end()
 
-    # -- interaction -------------------------------------------------------
-
-    def mousePressEvent(self, event) -> None:
-        self._dismiss()
-
-    def keyPressEvent(self, event) -> None:
-        self._dismiss()
-
-    def _dismiss(self) -> None:
-        if not self.isVisible():
-            return
+    def teardown(self) -> None:
         self.hide()
-        if self._parent_window:
-            self._parent_window.showNormal()
-            self._parent_window.activateWindow()
         self.close()
+        self.deleteLater()
 
 
 class TargetsTab(QWidget):
@@ -125,8 +103,14 @@ class TargetsTab(QWidget):
         super().__init__()
         self.targets_dir = targets_dir
         self.parent_window = parent_window
-        self._overlay = None       # prevent GC of capture overlay
-        self._test_overlay = None  # prevent GC of test-result overlay
+        self._overlay = None            # capture overlay ref
+        self._detection_overlay = None  # live-test overlay ref
+        self._test_toast = None         # live-test toast ref
+        self._poll_timer: QTimer | None = None
+        self._input_timer: QTimer | None = None
+        self._last_cursor_pos: tuple[int, int] | None = None
+        self._last_pixel: tuple[int, int, int] | None = None
+        self._pixel_sample_pt: tuple[int, int] | None = None
 
         self._build_ui()
         self.refresh()
@@ -228,20 +212,170 @@ class TargetsTab(QWidget):
         return card
 
     def _test_target(self, path: Path, confidence: float) -> None:
-        """Minimize the window, detect the target on screen, show result overlay."""
+        """Minimize the window, then live-poll the screen for the target."""
+        self._stop_test()
         self._test_path = path
         self._test_confidence = confidence
+        self._test_name = path.stem
         if self.parent_window:
             self.parent_window.showMinimized()
-        QTimer.singleShot(400, self._do_test)
+        QTimer.singleShot(400, self._start_live_test)
 
-    def _do_test(self) -> None:
-        box = find_image_box(self._test_path, self._test_confidence)
-        self._test_overlay = TestResultOverlay(
-            found=box is not None,
-            box=box,
-            parent_window=self.parent_window,
+    def _start_live_test(self) -> None:
+        self._detection_overlay = DetectionOverlay()
+        self._test_toast = show_toast(
+            f"Searching for {self._test_name}\u2026",
+            ToastType.INFO,
+            persistent=True,
+            on_close=self._stop_test,
         )
+        QTimer.singleShot(ANIM_SETTLE_MS, self._test_toast.activate)
+
+        self._poll_timer = QTimer()
+        self._poll_timer.setInterval(POLL_INTERVAL_MS)
+        self._poll_timer.timeout.connect(self._poll_tick)
+        self._poll_timer.start()
+
+        self._test_deadline = QTimer()
+        self._test_deadline.setSingleShot(True)
+        self._test_deadline.setInterval(TEST_TIMEOUT_MS)
+        self._test_deadline.timeout.connect(self._stop_test)
+        self._test_deadline.start()
+
+        self._poll_tick()
+
+    def _poll_tick(self) -> None:
+        box = find_image_box(self._test_path, self._test_confidence)
+        if self._detection_overlay:
+            self._detection_overlay.update_box(box)
+        if self._test_toast:
+            if box is not None:
+                self._test_toast.update_message(
+                    f"{self._test_name} detected  (Esc to close)",
+                    ToastType.SUCCESS,
+                )
+                self._freeze_test()
+            else:
+                self._test_toast.update_message(
+                    f"Searching for {self._test_name}\u2026  (Esc to cancel)",
+                    ToastType.WARNING,
+                )
+
+    def _freeze_test(self) -> None:
+        """Image found — stop fast polling, start watching for user input."""
+        if self._poll_timer is not None:
+            self._poll_timer.stop()
+            self._poll_timer = None
+        if hasattr(self, "_test_deadline") and self._test_deadline is not None:
+            self._test_deadline.stop()
+            self._test_deadline = None
+        if self._test_toast:
+            self._test_toast.activate()
+
+        pos = pyautogui.position()
+        self._last_cursor_pos = (pos.x, pos.y)
+
+        if self._detection_overlay and self._detection_overlay._box:
+            left, top, w, h = self._detection_overlay._box
+            cx, cy = left + w // 2, top + h // 2
+            self._pixel_sample_pt = (cx, cy)
+            try:
+                self._last_pixel = pyautogui.pixel(cx, cy)
+            except Exception:
+                self._last_pixel = None
+        else:
+            self._pixel_sample_pt = None
+            self._last_pixel = None
+
+        self._input_timer = QTimer()
+        self._input_timer.setInterval(INPUT_WATCH_MS)
+        self._input_timer.timeout.connect(self._input_watch_tick)
+        self._input_timer.start()
+
+    def _input_watch_tick(self) -> None:
+        """Lightweight check: re-detect when cursor moves or screen content changes."""
+        pos = pyautogui.position()
+        cursor_now = (pos.x, pos.y)
+        cursor_moved = (
+            self._last_cursor_pos is not None
+            and (
+                abs(cursor_now[0] - self._last_cursor_pos[0]) > CURSOR_MOVE_THRESHOLD
+                or abs(cursor_now[1] - self._last_cursor_pos[1]) > CURSOR_MOVE_THRESHOLD
+            )
+        )
+
+        pixel_changed = False
+        if self._pixel_sample_pt is not None:
+            try:
+                px = pyautogui.pixel(*self._pixel_sample_pt)
+                pixel_changed = not self._pixels_similar(px, self._last_pixel)
+            except Exception:
+                px = None
+
+        if not cursor_moved and not pixel_changed:
+            return
+        self._last_cursor_pos = cursor_now
+        if pixel_changed and px is not None:
+            self._last_pixel = px
+
+        box = find_image_box(self._test_path, self._test_confidence)
+        if self._detection_overlay:
+            self._detection_overlay.update_box(box)
+
+        if box is not None:
+            left, top, w, h = box
+            cx, cy = left + w // 2, top + h // 2
+            self._pixel_sample_pt = (cx, cy)
+            try:
+                self._last_pixel = pyautogui.pixel(cx, cy)
+            except Exception:
+                self._last_pixel = None
+
+        if self._test_toast:
+            if box is not None:
+                self._test_toast.update_message(
+                    f"{self._test_name} detected  (Esc to close)",
+                    ToastType.SUCCESS,
+                )
+            else:
+                self._test_toast.update_message(
+                    f"{self._test_name} not visible  (Esc to close)",
+                    ToastType.WARNING,
+                )
+
+    @staticmethod
+    def _pixels_similar(
+        a: tuple[int, int, int] | None,
+        b: tuple[int, int, int] | None,
+    ) -> bool:
+        """True when two RGB tuples are within PIXEL_TOLERANCE per channel."""
+        if a is None or b is None:
+            return a is b
+        return all(abs(ca - cb) <= PIXEL_TOLERANCE for ca, cb in zip(a, b))
+
+    def _stop_test(self) -> None:
+        if self._input_timer is not None:
+            self._input_timer.stop()
+            self._input_timer = None
+        self._last_cursor_pos = None
+        self._last_pixel = None
+        self._pixel_sample_pt = None
+        if self._poll_timer is not None:
+            self._poll_timer.stop()
+            self._poll_timer = None
+        if hasattr(self, "_test_deadline") and self._test_deadline is not None:
+            self._test_deadline.stop()
+            self._test_deadline = None
+        if self._detection_overlay is not None:
+            self._detection_overlay.teardown()
+            self._detection_overlay = None
+        if self._test_toast is not None:
+            toast, self._test_toast = self._test_toast, None
+            toast._on_close = None
+            toast.dismiss()
+        if self.parent_window:
+            self.parent_window.showNormal()
+            self.parent_window.activateWindow()
 
     def _start_capture(self):
         self._overlay = start_capture(
