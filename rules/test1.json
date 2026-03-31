@@ -1,6 +1,6 @@
 [
   {
-    "rule_name": "find customer",
+    "rule_name": "customer_names",
     "anchor": "Ship to",
     "direction": "below",
     "offset": 1,

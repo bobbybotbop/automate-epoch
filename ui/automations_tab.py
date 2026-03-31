@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QStackedWidget,
     QVBoxLayout,
@@ -28,7 +29,6 @@ ACTION_TYPES = [
     "type_value",
     "hotkey",
     "wait_for_image",
-    "loop_over_list",
 ]
 
 ACTION_DESCRIPTIONS = {
@@ -36,7 +36,6 @@ ACTION_DESCRIPTIONS = {
     "type_value": "Type text into focused field",
     "hotkey": "Send keyboard shortcut",
     "wait_for_image": "Wait for screen target to appear",
-    "loop_over_list": "Loop over parsed data field",
 }
 
 
@@ -157,19 +156,69 @@ class AutomationsTab(QWidget):
     # --- Editor forms per action type ---
 
     def _build_editors(self):
-        self._editor_click = self._make_target_editor()
+        self._editor_click = self._make_click_editor()
         self._editor_type = self._make_type_editor()
         self._editor_hotkey = self._make_hotkey_editor()
-        self._editor_wait = self._make_target_editor()
-        self._editor_loop = self._make_loop_editor()
+        self._editor_wait = self._make_wait_editor()
 
         self.editor_stack.addWidget(self._editor_click["widget"])   # 0: click_image
         self.editor_stack.addWidget(self._editor_type["widget"])    # 1: type_value
         self.editor_stack.addWidget(self._editor_hotkey["widget"])  # 2: hotkey
         self.editor_stack.addWidget(self._editor_wait["widget"])    # 3: wait_for_image
-        self.editor_stack.addWidget(self._editor_loop["widget"])    # 4: loop_over_list
 
-    def _make_target_editor(self) -> dict:
+    def _make_click_editor(self) -> dict:
+        """Editor for click_image with target, confidence, offset, and loop variable."""
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(0, 8, 0, 0)
+
+        layout.addWidget(QLabel("Target Image"))
+        combo = QComboBox()
+        layout.addWidget(combo)
+
+        layout.addWidget(QLabel("Confidence"))
+        spin_conf = QDoubleSpinBox()
+        spin_conf.setRange(0.5, 1.0)
+        spin_conf.setSingleStep(0.05)
+        spin_conf.setValue(0.85)
+        spin_conf.setDecimals(2)
+        layout.addWidget(spin_conf)
+
+        layout.addWidget(QLabel("Click Offset (pixels from image center)"))
+        offset_row = QHBoxLayout()
+        offset_row.addWidget(QLabel("X"))
+        spin_ox = QSpinBox()
+        spin_ox.setRange(-2000, 2000)
+        spin_ox.setValue(0)
+        spin_ox.setToolTip("Positive = right of image center")
+        offset_row.addWidget(spin_ox)
+        offset_row.addWidget(QLabel("Y"))
+        spin_oy = QSpinBox()
+        spin_oy.setRange(-2000, 2000)
+        spin_oy.setValue(0)
+        spin_oy.setToolTip("Positive = below image center")
+        offset_row.addWidget(spin_oy)
+        layout.addLayout(offset_row)
+
+        layout.addWidget(QLabel("Loop Variable (optional — repeat per parsed record)"))
+        loop_edit = QLineEdit()
+        loop_edit.setPlaceholderText("e.g. customer_name")
+        loop_edit.setToolTip(
+            "If set, the runner loops over this variable's values each run"
+        )
+        layout.addWidget(loop_edit)
+
+        layout.addStretch()
+        return {
+            "widget": w,
+            "target": combo,
+            "confidence": spin_conf,
+            "offset_x": spin_ox,
+            "offset_y": spin_oy,
+            "loop_variable": loop_edit,
+        }
+
+    def _make_wait_editor(self) -> dict:
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setContentsMargins(0, 8, 0, 0)
@@ -215,22 +264,9 @@ class AutomationsTab(QWidget):
         layout.addStretch()
         return {"widget": w, "keys": edit}
 
-    def _make_loop_editor(self) -> dict:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(0, 8, 0, 0)
-
-        layout.addWidget(QLabel("Field to loop over"))
-        edit = QLineEdit()
-        edit.setPlaceholderText("customer_name")
-        layout.addWidget(edit)
-
-        layout.addStretch()
-        return {"widget": w, "field": edit}
-
     def _refresh_targets(self):
-        for editor in (self._editor_click, self._editor_wait):
-            combo = editor["target"]
+        for ed in (self._editor_click, self._editor_wait):
+            combo = ed["target"]
             combo.clear()
             for f in sorted(self.targets_dir.glob("*.png")):
                 combo.addItem(f.name)
@@ -313,15 +349,19 @@ class AutomationsTab(QWidget):
     @staticmethod
     def _step_summary(step: dict) -> str:
         action = step.get("action", "?")
-        if action in ("click_image", "wait_for_image"):
-            return f"{action} \u2192 {step.get('target', '?')}"
+        if action == "click_image":
+            ox, oy = step.get("offset_x", 0), step.get("offset_y", 0)
+            offset = f" +({ox},{oy})" if ox or oy else ""
+            loop = step.get("loop_variable", "")
+            loop_tag = f" [loop:{loop}]" if loop else ""
+            return f"click \u2192 {step.get('target', '?')}{offset}{loop_tag}"
+        if action == "wait_for_image":
+            return f"wait \u2192 {step.get('target', '?')}"
         if action == "type_value":
             val = step.get("value", "")
-            return f"type_value \u2192 {val[:30]}"
+            return f"type \u2192 {val[:30]}"
         if action == "hotkey":
             return f"hotkey \u2192 {'+'.join(step.get('keys', []))}"
-        if action == "loop_over_list":
-            return f"loop \u2192 {step.get('field', '?')}"
         return action
 
     def _on_step_selected(self, row: int):
@@ -340,6 +380,9 @@ class AutomationsTab(QWidget):
         if action == "click_image":
             _set_combo(self._editor_click["target"], step.get("target", ""))
             self._editor_click["confidence"].setValue(step.get("confidence", 0.85))
+            self._editor_click["offset_x"].setValue(int(step.get("offset_x", 0)))
+            self._editor_click["offset_y"].setValue(int(step.get("offset_y", 0)))
+            self._editor_click["loop_variable"].setText(step.get("loop_variable", ""))
         elif action == "wait_for_image":
             _set_combo(self._editor_wait["target"], step.get("target", ""))
             self._editor_wait["confidence"].setValue(step.get("confidence", 0.85))
@@ -347,8 +390,6 @@ class AutomationsTab(QWidget):
             self._editor_type["value"].setText(step.get("value", ""))
         elif action == "hotkey":
             self._editor_hotkey["keys"].setText(",".join(step.get("keys", [])))
-        elif action == "loop_over_list":
-            self._editor_loop["field"].setText(step.get("field", ""))
 
     def _on_action_type_changed(self, idx: int):
         self.editor_stack.setCurrentIndex(idx)
@@ -406,6 +447,11 @@ class AutomationsTab(QWidget):
         if action == "click_image":
             step["target"] = self._editor_click["target"].currentText()
             step["confidence"] = self._editor_click["confidence"].value()
+            step["offset_x"] = self._editor_click["offset_x"].value()
+            step["offset_y"] = self._editor_click["offset_y"].value()
+            loop_var = self._editor_click["loop_variable"].text().strip()
+            if loop_var:
+                step["loop_variable"] = loop_var
         elif action == "wait_for_image":
             step["target"] = self._editor_wait["target"].currentText()
             step["confidence"] = self._editor_wait["confidence"].value()
@@ -414,8 +460,6 @@ class AutomationsTab(QWidget):
         elif action == "hotkey":
             keys_text = self._editor_hotkey["keys"].text()
             step["keys"] = [k.strip() for k in keys_text.split(",") if k.strip()]
-        elif action == "loop_over_list":
-            step["field"] = self._editor_loop["field"].text()
 
         steps[row] = step
         self._refresh_step_list()

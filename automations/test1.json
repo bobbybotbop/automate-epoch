@@ -1,0 +1,10 @@
+{
+  "name": "test1",
+  "steps": [
+    {
+      "action": "click_image",
+      "target": "title.png",
+      "confidence": 0.85
+    }
+  ]
+}

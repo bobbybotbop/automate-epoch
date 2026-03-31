@@ -40,6 +40,19 @@ def find_image(
     return (int(center.x), int(center.y))
 
 
+def find_image_box(
+    target_path: str | Path, confidence: float = 0.85
+) -> tuple[int, int, int, int] | None:
+    """Single non-blocking screen check. Returns (left, top, width, height) or None."""
+    try:
+        location = pyautogui.locateOnScreen(str(target_path), confidence=confidence)
+    except pyautogui.ImageNotFoundException:
+        return None
+    if location is None:
+        return None
+    return (int(location.left), int(location.top), int(location.width), int(location.height))
+
+
 def wait_for_image(
     target_path: str | Path,
     confidence: float = 0.85,
@@ -64,15 +77,22 @@ def click_image(
     confidence: float = 0.85,
     timeout: float = 10.0,
     clicks: int = 1,
+    offset_x: int = 0,
+    offset_y: int = 0,
 ) -> tuple[int, int]:
-    """Locate a target image on screen and click its center.
+    """Locate a target image on screen and click with optional offset.
+
+    *offset_x* / *offset_y* shift the click away from the image center
+    (positive x = right, positive y = down).
 
     Returns the (x, y) coordinates that were clicked.
     Raises TargetNotFoundError if not found within timeout.
     """
     coords = wait_for_image(target_path, confidence, timeout)
-    pyautogui.click(coords[0], coords[1], clicks=clicks)
-    return coords
+    click_x = coords[0] + offset_x
+    click_y = coords[1] + offset_y
+    pyautogui.click(click_x, click_y, clicks=clicks)
+    return (click_x, click_y)
 
 
 def type_value(text: str, interval: float = 0.02) -> None:

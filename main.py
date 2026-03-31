@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
     QMenu,
+    QStyle,
     QSystemTrayIcon,
     QTabWidget,
 )
@@ -285,6 +286,10 @@ class FlowDeskWindow(QMainWindow):
 
         self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setToolTip("FlowDesk")
+        # QSystemTrayIcon warns if no icon is assigned.
+        self.tray_icon.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        )
 
         tray_menu = QMenu()
         show_action = QAction("Show", self)
@@ -312,6 +317,11 @@ class FlowDeskWindow(QMainWindow):
 
 
 def main():
+    # Helps Qt pick the expected DPI behavior on Windows.
+    # (Do this before QApplication() so Qt reads the environment at startup.)
+    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_STYLESHEET)
 

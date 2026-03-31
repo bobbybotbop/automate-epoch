@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
+    QApplication,
     QDoubleSpinBox,
     QGridLayout,
     QHBoxLayout,
@@ -20,8 +21,103 @@ from PyQt6.QtWidgets import (
 )
 
 from modules.capture import start_capture
+from modules.screen import find_image_box
 
 META_FILENAME = "meta.json"
+
+
+class TestResultOverlay(QWidget):
+    """Fullscreen translucent overlay showing whether a target was detected."""
+
+    DISPLAY_MS = 3000
+
+    def __init__(
+        self,
+        found: bool,
+        box: tuple[int, int, int, int] | None = None,
+        parent_window=None,
+    ):
+        super().__init__()
+        self._found = found
+        self._box = box
+        self._parent_window = parent_window
+
+        screen = QApplication.primaryScreen()
+        self._ratio = screen.devicePixelRatio() if screen else 1.0
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        if screen:
+            self.setGeometry(screen.geometry())
+        self.showFullScreen()
+        self.activateWindow()
+
+        QTimer.singleShot(self.DISPLAY_MS, self._dismiss)
+
+    # -- painting ----------------------------------------------------------
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 60))
+
+        if self._found and self._box:
+            self._paint_found(painter)
+        else:
+            self._paint_not_found(painter)
+
+        painter.end()
+
+    def _paint_found(self, painter: QPainter) -> None:
+        left, top, w, h = self._box
+        r = self._ratio
+        left, top, w, h = int(left / r), int(top / r), int(w / r), int(h / r)
+
+        pen = QPen(QColor(0, 220, 100), 3, Qt.PenStyle.SolidLine)
+        painter.setPen(pen)
+        painter.setBrush(QColor(0, 220, 100, 45))
+        painter.drawRect(left, top, w, h)
+
+        font = painter.font()
+        font.setPointSize(13)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor(0, 220, 100))
+
+        label_y = top - 10 if top > 30 else top + h + 20
+        painter.drawText(left, label_y, "FOUND")
+
+    def _paint_not_found(self, painter: QPainter) -> None:
+        font = painter.font()
+        font.setPointSize(28)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor(255, 80, 80))
+        painter.drawText(
+            self.rect(), Qt.AlignmentFlag.AlignCenter, "NOT FOUND"
+        )
+
+    # -- interaction -------------------------------------------------------
+
+    def mousePressEvent(self, event) -> None:
+        self._dismiss()
+
+    def keyPressEvent(self, event) -> None:
+        self._dismiss()
+
+    def _dismiss(self) -> None:
+        if not self.isVisible():
+            return
+        self.hide()
+        if self._parent_window:
+            self._parent_window.showNormal()
+            self._parent_window.activateWindow()
+        self.close()
 
 
 class TargetsTab(QWidget):
@@ -29,7 +125,8 @@ class TargetsTab(QWidget):
         super().__init__()
         self.targets_dir = targets_dir
         self.parent_window = parent_window
-        self._overlay = None  # prevent GC of overlay widget
+        self._overlay = None       # prevent GC of capture overlay
+        self._test_overlay = None  # prevent GC of test-result overlay
 
         self._build_ui()
         self.refresh()
@@ -113,6 +210,14 @@ class TargetsTab(QWidget):
         spin.valueChanged.connect(lambda val, n=path.stem: self._save_confidence(n, val))
         bottom.addWidget(spin)
 
+        btn_test = QPushButton("Test")
+        btn_test.setFixedWidth(44)
+        btn_test.setToolTip("Check if this target is visible on screen")
+        btn_test.clicked.connect(
+            lambda _, p=path, s=spin: self._test_target(p, s.value())
+        )
+        bottom.addWidget(btn_test)
+
         btn_del = QPushButton("Del")
         btn_del.setObjectName("danger")
         btn_del.setFixedWidth(44)
@@ -121,6 +226,22 @@ class TargetsTab(QWidget):
 
         layout.addLayout(bottom)
         return card
+
+    def _test_target(self, path: Path, confidence: float) -> None:
+        """Minimize the window, detect the target on screen, show result overlay."""
+        self._test_path = path
+        self._test_confidence = confidence
+        if self.parent_window:
+            self.parent_window.showMinimized()
+        QTimer.singleShot(400, self._do_test)
+
+    def _do_test(self) -> None:
+        box = find_image_box(self._test_path, self._test_confidence)
+        self._test_overlay = TestResultOverlay(
+            found=box is not None,
+            box=box,
+            parent_window=self.parent_window,
+        )
 
     def _start_capture(self):
         self._overlay = start_capture(

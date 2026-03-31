@@ -108,8 +108,17 @@ class AutomationRunner(QThread):
             if action == "click_image":
                 target = self._resolve_target(step.get("target", ""))
                 conf = self._get_confidence(step)
-                screen.click_image(target, confidence=conf, timeout=step.get("timeout", 10))
-                return "ok", f"clicked {Path(target).name}"
+                ox = int(step.get("offset_x", 0))
+                oy = int(step.get("offset_y", 0))
+                screen.click_image(
+                    target,
+                    confidence=conf,
+                    timeout=step.get("timeout", 10),
+                    offset_x=ox,
+                    offset_y=oy,
+                )
+                suffix = f" offset({ox},{oy})" if ox or oy else ""
+                return "ok", f"clicked {Path(target).name}{suffix}"
 
             elif action == "type_value":
                 value = self._inject_variables(step.get("value", ""), record)
@@ -126,9 +135,6 @@ class AutomationRunner(QThread):
                 conf = self._get_confidence(step)
                 screen.wait_for_image(target, confidence=conf, timeout=step.get("timeout", 30))
                 return "ok", f"found {Path(target).name}"
-
-            elif action == "loop_over_list":
-                return "ok", "loop marker (handled by runner)"
 
             else:
                 return "skip", f"unknown action '{action}'"

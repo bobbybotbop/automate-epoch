@@ -66,22 +66,41 @@ def _try_joined_anchor(words: list[dict], anchor_text: str) -> list[dict]:
     return matches
 
 
-def _get_value_right(words: list[dict], anchor: dict, offset: int = 1) -> str | None:
-    """Get the word N positions to the right of the anchor on the same row."""
+def _collect_words_to_right(
+    words: list[dict], start_word: dict, word_count: int
+) -> str | None:
+    """Collect `word_count` words from start_word moving right on the same row."""
+    row_words = [
+        w
+        for w in words
+        if abs(w["top"] - start_word["top"]) < COORD_TOLERANCE and w["x0"] >= start_word["x0"]
+    ]
+    row_words.sort(key=lambda w: w["x0"])
+    if len(row_words) < word_count:
+        return None
+    return " ".join(w["text"] for w in row_words[:word_count])
+
+
+def _get_value_right(
+    words: list[dict], anchor: dict, offset: int = 1, word_count: int = 1
+) -> str | None:
+    """Find first word by `right` direction, then extend to right by spaces."""
     same_row = [
         w
         for w in words
         if abs(w["top"] - anchor["top"]) < COORD_TOLERANCE and w["x0"] > anchor["x1"]
     ]
     same_row.sort(key=lambda w: w["x0"])
-    idx = offset - 1
-    if 0 <= idx < len(same_row):
-        return same_row[idx]["text"]
-    return None
+    start = offset - 1
+    if start < 0 or start >= len(same_row):
+        return None
+    return _collect_words_to_right(words, same_row[start], word_count)
 
 
-def _get_value_below(words: list[dict], anchor: dict, offset: int = 1) -> str | None:
-    """Get the word N positions below the anchor in the same column."""
+def _get_value_below(
+    words: list[dict], anchor: dict, offset: int = 1, word_count: int = 1
+) -> str | None:
+    """Find first word by `below` direction, then extend to right by spaces."""
     same_col = [
         w
         for w in words
@@ -89,10 +108,10 @@ def _get_value_below(words: list[dict], anchor: dict, offset: int = 1) -> str | 
         and w["top"] > anchor["bottom"]
     ]
     same_col.sort(key=lambda w: w["top"])
-    idx = offset - 1
-    if 0 <= idx < len(same_col):
-        return same_col[idx]["text"]
-    return None
+    start = offset - 1
+    if start < 0 or start >= len(same_col):
+        return None
+    return _collect_words_to_right(words, same_col[start], word_count)
 
 
 def _apply_rule(words: list[dict], rule: dict) -> str | None:
@@ -103,12 +122,16 @@ def _apply_rule(words: list[dict], rule: dict) -> str | None:
 
     direction = rule.get("direction", "right")
     offset = rule.get("offset", 1)
+    try:
+        word_count = max(1, int(rule.get("word_count", 2)))
+    except (TypeError, ValueError):
+        word_count = 2
 
     for anchor in anchors:
         if direction == "right":
-            val = _get_value_right(words, anchor, offset)
+            val = _get_value_right(words, anchor, offset, word_count)
         elif direction == "below":
-            val = _get_value_below(words, anchor, offset)
+            val = _get_value_below(words, anchor, offset, word_count)
         else:
             val = None
         if val is not None:

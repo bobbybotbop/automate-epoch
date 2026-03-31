@@ -1,0 +1,57 @@
+run program with
+
+python main.py
+
+Big picture
+Parser — Define how to read fields from a PDF → saved under flowdesk\rules\ as JSON.
+Targets — Save small screenshots of buttons/fields QuickBooks (or any app) shows on screen → flowdesk\targets\.
+Automations — Define steps (hotkeys, type text, click/wait on targets) → flowdesk\automations\.
+Runner — Pick PDF + rule set + automation, then run: for each row the parser returns, it runs all automation steps and fills {{field_name}} from that row.
+1. Parser tab — extraction rules
+Rule sets — Left: create a set with New Set (stored as rules\<name>.json).
+
+Rules — Each rule has:
+
+Rule name — becomes the variable name, e.g. customer_name → use {{customer_name}} in automations.
+Anchor — text to find (can match a single word or a short phrase the parser joins).
+Direction — right = Nth word to the right on the same line; below = Nth word below in the same column.
+Offset — which word (1 = first after the anchor).
+Load PDF + Run Rules — Tests on a sample PDF; results show in the table (one row per “record” the parser finds).
+
+Multi-row PDFs: The engine splits “records” by repeating the first rule’s anchor on the page. Design that first rule so its anchor appears once per logical record (e.g. per invoice).
+
+2. Targets tab — screen images
+Capture New Target — Window minimizes; drag a rectangle on screen; name the file (saved as targets\<name>.png).
+Adjust confidence per image if matching is flaky; values are stored in targets\meta.json.
+PyAutoGUI failsafe: moving the mouse to a screen corner aborts automation (built into the library).
+3. Automations tab — what to automate
+Pick or create an automation (JSON under automations\).
+
+Steps — Add steps; reorder by dragging or Move Up / Down.
+
+For each step type:
+
+click_image / wait_for_image — Choose a PNG from targets\, set confidence if needed.
+type_value — Literal text or placeholders like {{customer_name}}.
+hotkey — Comma-separated keys, e.g. ctrl,f or ctrl,shift,s.
+loop_over_list — In the UI it’s tied to a field name; the runner already loops once per parsed record, so this step is effectively a marker (the executor treats it as a no-op “ok” step).
+On Error — Choose behavior when a step fails (e.g. abort vs skip record), per your automation JSON.
+
+4. Runner tab — run end-to-end
+Automation — Which JSON workflow to run.
+Rule set — Same rules you used to design/test the PDF.
+Load PDF — The file to process (often the same type you tested in Parser).
+Loop delay — Seconds between records (default 3s); gives the desktop app time to finish dialogs.
+Run — Parses the PDF, then for each record runs every step with {{...}} filled from that record.
+Pause / Stop — Pause freezes between steps; Stop ends the run.
+
+Emergency stop: Ctrl+Shift+Q stops the runner if it’s running.
+
+Logs appear in the window and are also written under flowdesk\logs\ with a timestamp in the filename.
+
+Tips
+Build rules and targets on real samples first; use Parser → Run Rules until the table looks right.
+Keep target images small and unique (one button, one field) for reliable locateOnScreen.
+Runner needs the target app visible (e.g. QuickBooks) in a consistent layout where your PNGs still match.
+loop_over_list vs looping
+The runner’s outer loop is: for each parsed record → run all steps. You do not need a special step to “start the loop.” The loop_over_list action is present in the UI for documentation/field selection; execution still follows the “one full pass per record” model above.

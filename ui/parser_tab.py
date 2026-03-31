@@ -124,6 +124,22 @@ class ParserTab(QWidget):
         self.spin_offset.setValue(1)
         center_layout.addWidget(self.spin_offset)
 
+        center_layout.addWidget(QLabel("Word count"))
+        wc_hint = QLabel(
+            "How many consecutive words to capture (e.g. 2 for first and last name)."
+        )
+        wc_hint.setObjectName("subtext")
+        wc_hint.setWordWrap(True)
+        center_layout.addWidget(wc_hint)
+        self.spin_word_count = QSpinBox()
+        self.spin_word_count.setMinimum(1)
+        self.spin_word_count.setMaximum(50)
+        self.spin_word_count.setValue(2)
+        self.spin_word_count.setToolTip(
+            "Joins this many words in reading order after the offset (same row or column)."
+        )
+        center_layout.addWidget(self.spin_word_count)
+
         btn_save_rule = QPushButton("Save Rule")
         btn_save_rule.setObjectName("primary")
         btn_save_rule.clicked.connect(self._save_current_rule)
@@ -225,6 +241,7 @@ class ParserTab(QWidget):
         if idx >= 0:
             self.combo_direction.setCurrentIndex(idx)
         self.spin_offset.setValue(rule.get("offset", 1))
+        self.spin_word_count.setValue(rule.get("word_count", 2))
 
     def _add_rule(self):
         new_rule = {
@@ -232,6 +249,7 @@ class ParserTab(QWidget):
             "anchor": "",
             "direction": "right",
             "offset": 1,
+            "word_count": 2,
             "page": None,
         }
         self._rules.append(new_rule)
@@ -256,6 +274,7 @@ class ParserTab(QWidget):
             "anchor": self.edit_anchor.text().strip(),
             "direction": self.combo_direction.currentText(),
             "offset": self.spin_offset.value(),
+            "word_count": self.spin_word_count.value(),
             "page": None,
         }
         self._dirty = True
