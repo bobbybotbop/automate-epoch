@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
+import threading
 from pathlib import Path
 
-from PyQt6.QtCore import QRect, Qt, QTimer
+from ctypes import wintypes
+from PyQt6.QtCore import QObject, QRect, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -24,8 +27,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-import pyautogui
-
 from modules.capture import start_capture
 from modules import screen
 from ui.toast import ToastType, show_toast
@@ -35,9 +36,116 @@ META_FILENAME = "meta.json"
 POLL_INTERVAL_MS = 500
 TEST_TIMEOUT_MS = 15_000
 ANIM_SETTLE_MS = 350
-INPUT_WATCH_MS = 200
-PIXEL_TOLERANCE = 12
-CURSOR_MOVE_THRESHOLD = 5
+
+
+class _InputBridge(QObject):
+    triggered = pyqtSignal()
+
+
+class GlobalInputWatcher:
+    """Windows global low-level input hook (mouse + keyboard)."""
+
+    WH_KEYBOARD_LL = 13
+    WH_MOUSE_LL = 14
+    HC_ACTION = 0
+    WM_QUIT = 0x0012
+
+    # Keyboard messages
+    WM_KEYDOWN = 0x0100
+    WM_SYSKEYDOWN = 0x0104
+
+    # Mouse messages
+    WM_MOUSEMOVE = 0x0200
+    WM_LBUTTONDOWN = 0x0201
+    WM_RBUTTONDOWN = 0x0204
+    WM_MBUTTONDOWN = 0x0207
+    WM_MOUSEWHEEL = 0x020A
+    WM_XBUTTONDOWN = 0x020B
+
+    def __init__(self, on_input) -> None:
+        self._on_input = on_input
+        self._thread: threading.Thread | None = None
+        self._thread_id: int | None = None
+        self._started = threading.Event()
+        self._running = False
+
+        self._mouse_hook = None
+        self._keyboard_hook = None
+        self._mouse_proc = None
+        self._keyboard_proc = None
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._started.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        self._started.wait(timeout=1.0)
+
+    def stop(self) -> None:
+        if not self._running:
+            return
+        self._running = False
+        if self._thread_id:
+            ctypes.windll.user32.PostThreadMessageW(self._thread_id, self.WM_QUIT, 0, 0)
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        self._thread = None
+        self._thread_id = None
+
+    def _run(self) -> None:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        self._thread_id = int(kernel32.GetCurrentThreadId())
+
+        LowLevelProc = ctypes.WINFUNCTYPE(
+            wintypes.LPARAM, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
+        )
+
+        mouse_messages = {
+            self.WM_MOUSEMOVE,
+            self.WM_LBUTTONDOWN,
+            self.WM_RBUTTONDOWN,
+            self.WM_MBUTTONDOWN,
+            self.WM_MOUSEWHEEL,
+            self.WM_XBUTTONDOWN,
+        }
+        key_messages = {self.WM_KEYDOWN, self.WM_SYSKEYDOWN}
+
+        def mouse_proc(n_code, w_param, l_param):
+            if n_code == self.HC_ACTION and int(w_param) in mouse_messages and self._running:
+                self._on_input()
+            return user32.CallNextHookEx(0, n_code, w_param, l_param)
+
+        def keyboard_proc(n_code, w_param, l_param):
+            if n_code == self.HC_ACTION and int(w_param) in key_messages and self._running:
+                self._on_input()
+            return user32.CallNextHookEx(0, n_code, w_param, l_param)
+
+        self._mouse_proc = LowLevelProc(mouse_proc)
+        self._keyboard_proc = LowLevelProc(keyboard_proc)
+
+        self._mouse_hook = user32.SetWindowsHookExW(
+            self.WH_MOUSE_LL, self._mouse_proc, kernel32.GetModuleHandleW(None), 0
+        )
+        self._keyboard_hook = user32.SetWindowsHookExW(
+            self.WH_KEYBOARD_LL, self._keyboard_proc, kernel32.GetModuleHandleW(None), 0
+        )
+        self._started.set()
+
+        msg = wintypes.MSG()
+        while self._running and user32.GetMessageW(ctypes.byref(msg), 0, 0, 0) != 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+
+        if self._mouse_hook:
+            user32.UnhookWindowsHookEx(self._mouse_hook)
+            self._mouse_hook = None
+        if self._keyboard_hook:
+            user32.UnhookWindowsHookEx(self._keyboard_hook)
+            self._keyboard_hook = None
 
 
 class DetectionOverlay(QWidget):
@@ -134,10 +242,11 @@ class TargetsTab(QWidget):
         self._detection_overlay = None  # live-test overlay ref
         self._test_toast = None         # live-test toast ref
         self._poll_timer: QTimer | None = None
-        self._input_timer: QTimer | None = None
-        self._last_cursor_pos: tuple[int, int] | None = None
-        self._last_pixel: tuple[int, int, int] | None = None
-        self._pixel_sample_pt: tuple[int, int] | None = None
+        self._input_watcher: GlobalInputWatcher | None = None
+        self._input_bridge = _InputBridge()
+        self._input_bridge.triggered.connect(self._input_watch_tick)
+        self._input_refresh_lock = threading.Lock()
+        self._input_refresh_pending = False
         self._test_mode: str = "image"  # image|text
 
         self._build_ui()
@@ -387,7 +496,7 @@ class TargetsTab(QWidget):
                 )
 
     def _freeze_test(self) -> None:
-        """Image found — stop fast polling, start watching for user input."""
+        """Image found — stop polling, then re-check only on user input."""
         if self._poll_timer is not None:
             self._poll_timer.stop()
             self._poll_timer = None
@@ -397,51 +506,29 @@ class TargetsTab(QWidget):
         if self._test_toast:
             self._test_toast.activate()
 
-        pos = pyautogui.position()
-        self._last_cursor_pos = (pos.x, pos.y)
+        self._start_input_watch()
 
-        if self._detection_overlay and self._detection_overlay._box:
-            left, top, w, h = self._detection_overlay._box
-            cx, cy = left + w // 2, top + h // 2
-            self._pixel_sample_pt = (cx, cy)
-            try:
-                self._last_pixel = pyautogui.pixel(cx, cy)
-            except Exception:
-                self._last_pixel = None
-        else:
-            self._pixel_sample_pt = None
-            self._last_pixel = None
+    def _start_input_watch(self) -> None:
+        self._stop_input_watch()
+        self._input_watcher = GlobalInputWatcher(self._on_global_input)
+        self._input_watcher.start()
 
-        self._input_timer = QTimer()
-        self._input_timer.setInterval(INPUT_WATCH_MS)
-        self._input_timer.timeout.connect(self._input_watch_tick)
-        self._input_timer.start()
+    def _stop_input_watch(self) -> None:
+        if self._input_watcher is not None:
+            self._input_watcher.stop()
+            self._input_watcher = None
+
+    def _on_global_input(self) -> None:
+        with self._input_refresh_lock:
+            if self._input_refresh_pending:
+                return
+            self._input_refresh_pending = True
+        self._input_bridge.triggered.emit()
 
     def _input_watch_tick(self) -> None:
-        """Lightweight check: re-detect when cursor moves or screen content changes."""
-        pos = pyautogui.position()
-        cursor_now = (pos.x, pos.y)
-        cursor_moved = (
-            self._last_cursor_pos is not None
-            and (
-                abs(cursor_now[0] - self._last_cursor_pos[0]) > CURSOR_MOVE_THRESHOLD
-                or abs(cursor_now[1] - self._last_cursor_pos[1]) > CURSOR_MOVE_THRESHOLD
-            )
-        )
-
-        pixel_changed = False
-        if self._pixel_sample_pt is not None:
-            try:
-                px = pyautogui.pixel(*self._pixel_sample_pt)
-                pixel_changed = not self._pixels_similar(px, self._last_pixel)
-            except Exception:
-                px = None
-
-        if not cursor_moved and not pixel_changed:
-            return
-        self._last_cursor_pos = cursor_now
-        if pixel_changed and px is not None:
-            self._last_pixel = px
+        """Re-detect current target after a real input event."""
+        with self._input_refresh_lock:
+            self._input_refresh_pending = False
 
         point = None
         if self._test_mode == "text":
@@ -459,15 +546,6 @@ class TargetsTab(QWidget):
         if self._detection_overlay:
             self._detection_overlay.update_detection(box, point)
 
-        if box is not None:
-            left, top, w, h = box
-            cx, cy = left + w // 2, top + h // 2
-            self._pixel_sample_pt = (cx, cy)
-            try:
-                self._last_pixel = pyautogui.pixel(cx, cy)
-            except Exception:
-                self._last_pixel = None
-
         if self._test_toast:
             if box is not None:
                 self._test_toast.update_message(
@@ -480,23 +558,10 @@ class TargetsTab(QWidget):
                     ToastType.WARNING,
                 )
 
-    @staticmethod
-    def _pixels_similar(
-        a: tuple[int, int, int] | None,
-        b: tuple[int, int, int] | None,
-    ) -> bool:
-        """True when two RGB tuples are within PIXEL_TOLERANCE per channel."""
-        if a is None or b is None:
-            return a is b
-        return all(abs(ca - cb) <= PIXEL_TOLERANCE for ca, cb in zip(a, b))
-
     def _stop_test(self) -> None:
-        if self._input_timer is not None:
-            self._input_timer.stop()
-            self._input_timer = None
-        self._last_cursor_pos = None
-        self._last_pixel = None
-        self._pixel_sample_pt = None
+        self._stop_input_watch()
+        with self._input_refresh_lock:
+            self._input_refresh_pending = False
         self._test_mode = "image"
         if self._poll_timer is not None:
             self._poll_timer.stop()

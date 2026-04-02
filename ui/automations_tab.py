@@ -17,7 +17,6 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QSpinBox,
     QSplitter,
@@ -30,20 +29,16 @@ import pygetwindow as gw
 
 ACTION_TYPES = [
     "click_image",
-    "type_value",
-    "hotkey",
-    "wait_for_image",
     "search_by_text",
     "simple_click",
+    "type_value",
 ]
 
 ACTION_DESCRIPTIONS = {
-    "click_image": "Find & click a screen target",
-    "type_value": "Type text into focused field",
-    "hotkey": "Send keyboard shortcut",
-    "wait_for_image": "Wait for screen target to appear",
+    "click_image": "Wait for image & move mouse to it",
     "search_by_text": "OCR-find text on screen & move mouse",
     "simple_click": "Click at current cursor position",
+    "type_value": "Type text into focused field",
 }
 
 
@@ -201,21 +196,17 @@ class AutomationsTab(QWidget):
 
     def _build_editors(self):
         self._editor_click = self._make_click_editor()
-        self._editor_type = self._make_type_editor()
-        self._editor_hotkey = self._make_hotkey_editor()
-        self._editor_wait = self._make_wait_editor()
         self._editor_search_text = self._make_search_text_editor()
         self._editor_simple_click = self._make_simple_click_editor()
+        self._editor_type = self._make_type_editor()
 
         self.editor_stack.addWidget(self._editor_click["widget"])        # 0: click_image
-        self.editor_stack.addWidget(self._editor_type["widget"])         # 1: type_value
-        self.editor_stack.addWidget(self._editor_hotkey["widget"])       # 2: hotkey
-        self.editor_stack.addWidget(self._editor_wait["widget"])         # 3: wait_for_image
-        self.editor_stack.addWidget(self._editor_search_text["widget"])  # 4: search_by_text
-        self.editor_stack.addWidget(self._editor_simple_click["widget"]) # 5: simple_click
+        self.editor_stack.addWidget(self._editor_search_text["widget"])  # 1: search_by_text
+        self.editor_stack.addWidget(self._editor_simple_click["widget"]) # 2: simple_click
+        self.editor_stack.addWidget(self._editor_type["widget"])         # 3: type_value
 
     def _make_click_editor(self) -> dict:
-        """Editor for click_image with target, confidence, offset, and loop variable."""
+        """Editor for click_image: wait for target image then move mouse to it."""
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setContentsMargins(0, 8, 0, 0)
@@ -232,7 +223,7 @@ class AutomationsTab(QWidget):
         spin_conf.setDecimals(2)
         layout.addWidget(spin_conf)
 
-        layout.addWidget(QLabel("Click Offset (pixels from image center)"))
+        layout.addWidget(QLabel("Offset (pixels from image center)"))
         offset_row = QHBoxLayout()
         offset_row.addWidget(QLabel("X"))
         spin_ox = QSpinBox()
@@ -248,14 +239,12 @@ class AutomationsTab(QWidget):
         offset_row.addWidget(spin_oy)
         layout.addLayout(offset_row)
 
-        layout.addWidget(QLabel("Loop Variable (optional — one click per value)"))
-        loop_combo = QComboBox()
-        loop_combo.setToolTip(
-            "Parser rule names from rules/*.json. If the field has several values "
-            "(comma/newline-separated, or a list), this step clicks once per value. "
-            "Leave empty for a single click. Unknown names can be added when loading old automations."
-        )
-        layout.addWidget(loop_combo)
+        layout.addWidget(QLabel("Timeout (seconds, 0 = wait forever)"))
+        spin_timeout = QSpinBox()
+        spin_timeout.setRange(0, 9999)
+        spin_timeout.setValue(0)
+        spin_timeout.setToolTip("0 means wait indefinitely until the image appears")
+        layout.addWidget(spin_timeout)
 
         layout.addStretch()
         return {
@@ -264,28 +253,8 @@ class AutomationsTab(QWidget):
             "confidence": spin_conf,
             "offset_x": spin_ox,
             "offset_y": spin_oy,
-            "loop_variable": loop_combo,
+            "timeout": spin_timeout,
         }
-
-    def _make_wait_editor(self) -> dict:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(0, 8, 0, 0)
-
-        layout.addWidget(QLabel("Target Image"))
-        combo = QComboBox()
-        layout.addWidget(combo)
-
-        layout.addWidget(QLabel("Confidence"))
-        spin = QDoubleSpinBox()
-        spin.setRange(0.5, 1.0)
-        spin.setSingleStep(0.05)
-        spin.setValue(0.85)
-        spin.setDecimals(2)
-        layout.addWidget(spin)
-
-        layout.addStretch()
-        return {"widget": w, "target": combo, "confidence": spin}
 
     def _make_type_editor(self) -> dict:
         w = QWidget()
@@ -318,19 +287,6 @@ class AutomationsTab(QWidget):
 
         layout.addStretch()
         return {"widget": w, "value": edit, "variable_combo": var_combo}
-
-    def _make_hotkey_editor(self) -> dict:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(0, 8, 0, 0)
-
-        layout.addWidget(QLabel("Keys (comma-separated, e.g. ctrl,p)"))
-        edit = QLineEdit()
-        edit.setPlaceholderText("ctrl,p")
-        layout.addWidget(edit)
-
-        layout.addStretch()
-        return {"widget": w, "keys": edit}
 
     def _make_search_text_editor(self) -> dict:
         w = QWidget()
@@ -437,16 +393,14 @@ class AutomationsTab(QWidget):
             _set_combo(combo, prev)
 
     def _refresh_targets(self):
-        for ed in (self._editor_click, self._editor_wait):
-            combo = ed["target"]
-            combo.clear()
-            for f in sorted(self.targets_dir.glob("*.png")):
-                combo.addItem(f.name)
+        combo = self._editor_click["target"]
+        combo.clear()
+        for f in sorted(self.targets_dir.glob("*.png")):
+            combo.addItem(f.name)
 
     def _refresh_rule_variables(self):
         names = _collect_rule_names(self.rules_dir)
         for combo in (
-            self._editor_click["loop_variable"],
             self._editor_type["variable_combo"],
             self._editor_search_text["variable_combo"],
         ):
@@ -552,19 +506,13 @@ class AutomationsTab(QWidget):
     @staticmethod
     def _step_summary(step: dict) -> str:
         action = step.get("action", "?")
-        if action == "click_image":
+        if action in ("click_image", "wait_for_image"):
             ox, oy = step.get("offset_x", 0), -step.get("offset_y", 0)
             offset = f" +({ox},{oy})" if ox or oy else ""
-            loop = step.get("loop_variable", "")
-            loop_tag = f" [loop:{loop}]" if loop else ""
-            return f"click \u2192 {step.get('target', '?')}{offset}{loop_tag}"
-        if action == "wait_for_image":
-            return f"wait \u2192 {step.get('target', '?')}"
+            return f"move \u2192 {step.get('target', '?')}{offset}"
         if action == "type_value":
             val = step.get("value", "")
             return f"type \u2192 {val[:30]}"
-        if action == "hotkey":
-            return f"hotkey \u2192 {'+'.join(step.get('keys', []))}"
         if action == "search_by_text":
             q = step.get("query", "")
             win = step.get("window_title", "")
@@ -584,6 +532,8 @@ class AutomationsTab(QWidget):
             return
         step = steps[row]
         action = step.get("action", "click_image")
+        if action == "wait_for_image":
+            action = "click_image"
         idx = ACTION_TYPES.index(action) if action in ACTION_TYPES else 0
         self.combo_action.setCurrentIndex(idx)
         self.editor_stack.setCurrentIndex(idx)
@@ -591,23 +541,14 @@ class AutomationsTab(QWidget):
 
     def _load_step_into_editor(self, step: dict):
         action = step.get("action", "click_image")
-        if action == "click_image":
+        if action in ("click_image", "wait_for_image"):
             _set_combo(self._editor_click["target"], step.get("target", ""))
             self._editor_click["confidence"].setValue(step.get("confidence", 0.85))
             self._editor_click["offset_x"].setValue(int(step.get("offset_x", 0)))
-            # Flip Y sign so editor direction matches expected click direction.
             self._editor_click["offset_y"].setValue(-int(step.get("offset_y", 0)))
-            _set_combo(
-                self._editor_click["loop_variable"],
-                step.get("loop_variable", ""),
-            )
-        elif action == "wait_for_image":
-            _set_combo(self._editor_wait["target"], step.get("target", ""))
-            self._editor_wait["confidence"].setValue(step.get("confidence", 0.85))
+            self._editor_click["timeout"].setValue(int(step.get("timeout", 0)))
         elif action == "type_value":
             self._editor_type["value"].setText(step.get("value", ""))
-        elif action == "hotkey":
-            self._editor_hotkey["keys"].setText(",".join(step.get("keys", [])))
         elif action == "search_by_text":
             self._editor_search_text["query"].setText(step.get("query", ""))
             _set_combo(
@@ -686,19 +627,10 @@ class AutomationsTab(QWidget):
             step["target"] = self._editor_click["target"].currentText()
             step["confidence"] = self._editor_click["confidence"].value()
             step["offset_x"] = self._editor_click["offset_x"].value()
-            # Flip Y sign on save so the stored offset matches the runner.
             step["offset_y"] = -self._editor_click["offset_y"].value()
-            loop_var = self._editor_click["loop_variable"].currentText().strip()
-            if loop_var:
-                step["loop_variable"] = loop_var
-        elif action == "wait_for_image":
-            step["target"] = self._editor_wait["target"].currentText()
-            step["confidence"] = self._editor_wait["confidence"].value()
+            step["timeout"] = self._editor_click["timeout"].value()
         elif action == "type_value":
             step["value"] = self._editor_type["value"].text()
-        elif action == "hotkey":
-            keys_text = self._editor_hotkey["keys"].text()
-            step["keys"] = [k.strip() for k in keys_text.split(",") if k.strip()]
         elif action == "search_by_text":
             step["query"] = self._editor_search_text["query"].text()
             wt = self._editor_search_text["window_title"].currentText().strip()
