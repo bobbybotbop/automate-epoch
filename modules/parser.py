@@ -14,14 +14,38 @@ import pdfplumber
 COORD_TOLERANCE = 5  # points – how close two words must be to count as "same row/col"
 
 
-def load_rules(path: str | Path) -> list[dict]:
+def load_rules_bundle(path: str | Path) -> tuple[list[dict], dict[str, Any]]:
+    """Load rules and optional editor metadata (Parser tab).
+
+    Supports legacy files: a bare JSON array of rule dicts.
+    Wrapped format: ``{"rules": [...], "editor_mode": "test", ...}``.
+    """
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    if isinstance(data, list):
+        return data, {}
+    if isinstance(data, dict) and isinstance(data.get("rules"), list):
+        meta = {k: v for k, v in data.items() if k != "rules"}
+        return data["rules"], meta
+    return [], {}
 
 
-def save_rules(rules: list[dict], path: str | Path) -> None:
+def load_rules(path: str | Path) -> list[dict]:
+    rules, _ = load_rules_bundle(path)
+    return rules
+
+
+def save_rules(
+    rules: list[dict],
+    path: str | Path,
+    *,
+    meta: dict[str, Any] | None = None,
+) -> None:
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(rules, f, indent=2)
+        if meta:
+            json.dump({"rules": rules, **meta}, f, indent=2)
+        else:
+            json.dump(rules, f, indent=2)
 
 
 def _extract_words(page: pdfplumber.page.Page) -> list[dict]:

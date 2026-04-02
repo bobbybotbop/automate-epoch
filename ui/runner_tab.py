@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from modules.parser import load_rules, parse_pdf
+from modules.parser import load_rules_bundle, parse_pdf
 from modules.runner import AutomationRunner, load_automation, load_confidence_meta
 
 
@@ -190,22 +190,63 @@ class RunnerTab(QWidget):
                 QMessageBox.warning(self, "Missing",
                     "This automation uses {{variables}} — select a rule set.")
                 return
-            if not self._pdf_path:
-                QMessageBox.warning(self, "Missing",
-                    "This automation uses {{variables}} — load a PDF file.")
-                return
             try:
-                rules = load_rules(rules_path)
-                parsed = parse_pdf(self._pdf_path, rules)
+                rules, meta = load_rules_bundle(rules_path)
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
                 return
-            if not parsed:
-                QMessageBox.warning(self, "No Data",
-                    "PDF parsing returned no records.")
+
+            is_test_ruleset = (meta.get("editor_mode") or "").lower() == "test"
+            test_data = list(meta.get("test_data") or [])
+
+            if is_test_ruleset and test_data:
+                if not rules:
+                    QMessageBox.warning(
+                        self, "No Rules", "Test rule set has no rules defined."
+                    )
+                    return
+                rule_name = (rules[0].get("rule_name") or "data").strip() or "data"
+                parsed = [{rule_name: str(token)} for token in test_data]
+                self.log_view.clear()
+                self._append_log(
+                    f"Loaded {len(parsed)} record(s) from test data (no PDF)."
+                )
+            elif is_test_ruleset and not test_data and self._pdf_path:
+                try:
+                    parsed = parse_pdf(self._pdf_path, rules)
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", str(e))
+                    return
+                if not parsed:
+                    QMessageBox.warning(self, "No Data",
+                        "PDF parsing returned no records.")
+                    return
+                self.log_view.clear()
+                self._append_log(f"Loaded {len(parsed)} record(s) from PDF.")
+            elif is_test_ruleset and not test_data:
+                QMessageBox.warning(
+                    self,
+                    "No Test Data",
+                    "This rule set is in Test mode with no saved Data. "
+                    "Add Data in the Parser tab and save, or load a PDF.",
+                )
                 return
-            self.log_view.clear()
-            self._append_log(f"Loaded {len(parsed)} record(s) from PDF.")
+            else:
+                if not self._pdf_path:
+                    QMessageBox.warning(self, "Missing",
+                        "This automation uses {{variables}} — load a PDF file.")
+                    return
+                try:
+                    parsed = parse_pdf(self._pdf_path, rules)
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", str(e))
+                    return
+                if not parsed:
+                    QMessageBox.warning(self, "No Data",
+                        "PDF parsing returned no records.")
+                    return
+                self.log_view.clear()
+                self._append_log(f"Loaded {len(parsed)} record(s) from PDF.")
         else:
             repeat = self.spin_repeat.value()
             parsed = [{}] * repeat

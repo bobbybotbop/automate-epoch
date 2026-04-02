@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import re
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from modules.parser import load_rules, parse_pdf, save_rules
+from modules.parser import load_rules_bundle, parse_pdf, save_rules
 
 RULES_DIR: Path = Path()
 _current_file: Path | None = None
@@ -40,6 +40,7 @@ class ParserTab(QWidget):
         self._current_file: Path | None = None
         self._rules: list[dict] = []
         self._pdf_path: str | None = None
+        self._test_data_tokens: list[str] = []
         self._dirty = False
 
         self._build_ui()
@@ -102,35 +103,52 @@ class ParserTab(QWidget):
         form_heading.setObjectName("heading")
         center_layout.addWidget(form_heading)
 
-        center_layout.addWidget(QLabel("Rule Name"))
+        self._rule_editor_hint = QLabel("Select a rule from the list to edit.")
+        self._rule_editor_hint.setObjectName("subtext")
+        self._rule_editor_hint.setWordWrap(True)
+        center_layout.addWidget(self._rule_editor_hint)
+
+        self.mode_label = QLabel("Mode")
+        center_layout.addWidget(self.mode_label)
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItems(["Normal", "Test"])
+        self.combo_mode.currentTextChanged.connect(self._on_mode_changed)
+        center_layout.addWidget(self.combo_mode)
+
+        self.rule_name_label = QLabel("Rule Name")
+        center_layout.addWidget(self.rule_name_label)
         self.edit_name = QLineEdit()
         self.edit_name.setPlaceholderText("e.g. customer_name")
         center_layout.addWidget(self.edit_name)
 
-        center_layout.addWidget(QLabel("Anchor Text"))
+        self.anchor_label = QLabel("Anchor Text")
+        center_layout.addWidget(self.anchor_label)
         self.edit_anchor = QLineEdit()
         self.edit_anchor.setPlaceholderText('e.g. Customer:')
         center_layout.addWidget(self.edit_anchor)
 
-        center_layout.addWidget(QLabel("Direction"))
+        self.direction_label = QLabel("Direction")
+        center_layout.addWidget(self.direction_label)
         self.combo_direction = QComboBox()
         self.combo_direction.addItems(["right", "below"])
         center_layout.addWidget(self.combo_direction)
 
-        center_layout.addWidget(QLabel("Offset"))
+        self.offset_label = QLabel("Offset")
+        center_layout.addWidget(self.offset_label)
         self.spin_offset = QSpinBox()
         self.spin_offset.setMinimum(1)
         self.spin_offset.setMaximum(50)
         self.spin_offset.setValue(1)
         center_layout.addWidget(self.spin_offset)
 
-        center_layout.addWidget(QLabel("Word count"))
-        wc_hint = QLabel(
+        self.word_count_label = QLabel("Word count")
+        center_layout.addWidget(self.word_count_label)
+        self.wc_hint = QLabel(
             "How many consecutive words to capture (e.g. 2 for first and last name)."
         )
-        wc_hint.setObjectName("subtext")
-        wc_hint.setWordWrap(True)
-        center_layout.addWidget(wc_hint)
+        self.wc_hint.setObjectName("subtext")
+        self.wc_hint.setWordWrap(True)
+        center_layout.addWidget(self.wc_hint)
         self.spin_word_count = QSpinBox()
         self.spin_word_count.setMinimum(1)
         self.spin_word_count.setMaximum(50)
@@ -140,10 +158,35 @@ class ParserTab(QWidget):
         )
         center_layout.addWidget(self.spin_word_count)
 
+        self.data_label = QLabel("Data")
+        center_layout.addWidget(self.data_label)
+        self.edit_data = QLineEdit()
+        self.edit_data.setPlaceholderText("e.g. invoice_no, customer_name total")
+        center_layout.addWidget(self.edit_data)
+
         btn_save_rule = QPushButton("Save Rule")
         btn_save_rule.setObjectName("primary")
         btn_save_rule.clicked.connect(self._save_current_rule)
         center_layout.addWidget(btn_save_rule)
+
+        self._rule_editor_widgets = (
+            self.mode_label,
+            self.combo_mode,
+            self.rule_name_label,
+            self.edit_name,
+            self.anchor_label,
+            self.edit_anchor,
+            self.direction_label,
+            self.combo_direction,
+            self.offset_label,
+            self.spin_offset,
+            self.word_count_label,
+            self.wc_hint,
+            self.spin_word_count,
+            self.data_label,
+            self.edit_data,
+            btn_save_rule,
+        )
 
         center_layout.addStretch()
         splitter.addWidget(center)
@@ -160,14 +203,14 @@ class ParserTab(QWidget):
         pdf_row = QHBoxLayout()
         self.pdf_label = QLabel("No PDF loaded")
         self.pdf_label.setObjectName("subtext")
-        btn_load_pdf = QPushButton("Load PDF")
-        btn_load_pdf.clicked.connect(self._load_pdf)
-        btn_run = QPushButton("Run Rules")
-        btn_run.setObjectName("primary")
-        btn_run.clicked.connect(self._run_rules)
+        self.btn_load_pdf = QPushButton("Load PDF")
+        self.btn_load_pdf.clicked.connect(self._load_pdf)
+        self.btn_run = QPushButton("Run Rules")
+        self.btn_run.setObjectName("primary")
+        self.btn_run.clicked.connect(self._run_rules)
         pdf_row.addWidget(self.pdf_label, 1)
-        pdf_row.addWidget(btn_load_pdf)
-        pdf_row.addWidget(btn_run)
+        pdf_row.addWidget(self.btn_load_pdf)
+        pdf_row.addWidget(self.btn_run)
         right_layout.addLayout(pdf_row)
 
         self.results_table = QTableWidget()
@@ -180,6 +223,8 @@ class ParserTab(QWidget):
         splitter.addWidget(right)
         splitter.setSizes([220, 260, 420])
 
+        self._set_rule_editor_visible(False)
+        self._on_mode_changed(self.combo_mode.currentText())
         self._refresh_file_list()
 
     # --- File management ---
@@ -195,9 +240,27 @@ class ParserTab(QWidget):
         self._save_if_dirty()
         path = RULES_DIR / f"{current.text()}.json"
         self._current_file = path
-        self._rules = load_rules(path) if path.exists() else []
+        if path.exists():
+            self._rules, meta = load_rules_bundle(path)
+            self._test_data_tokens = list(meta.get("test_data") or [])
+            mode = (meta.get("editor_mode") or "normal").lower()
+        else:
+            self._rules = []
+            self._test_data_tokens = []
+            mode = "normal"
         self._dirty = False
+
+        self.combo_mode.blockSignals(True)
+        idx = self.combo_mode.findText("Test" if mode == "test" else "Normal")
+        self.combo_mode.setCurrentIndex(max(0, idx))
+        self.combo_mode.blockSignals(False)
+
         self._refresh_rule_list()
+        if self.rule_list.count() > 0:
+            self.rule_list.setCurrentRow(0)
+        else:
+            self._set_rule_editor_visible(False)
+        self._on_mode_changed(self.combo_mode.currentText())
 
     def _new_rule_set(self):
         name, ok = _ask_text(self, "New Rule Set", "Name:")
@@ -222,17 +285,33 @@ class ParserTab(QWidget):
         self._rules = []
         self._refresh_file_list()
         self._refresh_rule_list()
+        self._set_rule_editor_visible(False)
 
     # --- Rule list ---
+
+    def _has_rule_selection(self) -> bool:
+        row = self.rule_list.currentRow()
+        return 0 <= row < len(self._rules)
+
+    def _set_rule_editor_visible(self, visible: bool):
+        self._rule_editor_hint.setVisible(not visible)
+        for w in self._rule_editor_widgets:
+            w.setVisible(visible)
+        if visible:
+            self._on_mode_changed(self.combo_mode.currentText())
 
     def _refresh_rule_list(self):
         self.rule_list.clear()
         for r in self._rules:
             self.rule_list.addItem(r.get("rule_name", "(unnamed)"))
+        if not self._rules:
+            self._set_rule_editor_visible(False)
 
     def _on_rule_selected(self, row: int):
         if row < 0 or row >= len(self._rules):
+            self._set_rule_editor_visible(False)
             return
+        self._set_rule_editor_visible(True)
         rule = self._rules[row]
         self.edit_name.setText(rule.get("rule_name", ""))
         self.edit_anchor.setText(rule.get("anchor", ""))
@@ -242,6 +321,8 @@ class ParserTab(QWidget):
             self.combo_direction.setCurrentIndex(idx)
         self.spin_offset.setValue(rule.get("offset", 1))
         self.spin_word_count.setValue(rule.get("word_count", 2))
+        if self._is_test_mode():
+            self.edit_data.setText(" ".join(self._test_data_tokens))
 
     def _add_rule(self):
         new_rule = {
@@ -264,8 +345,14 @@ class ParserTab(QWidget):
             self._dirty = True
             self._refresh_rule_list()
             self._persist()
+            if self._rules:
+                self.rule_list.setCurrentRow(min(row, len(self._rules) - 1))
 
     def _save_current_rule(self):
+        if self._is_test_mode():
+            self._save_test_data_rules()
+            return
+
         row = self.rule_list.currentRow()
         if row < 0 or row >= len(self._rules):
             return
@@ -282,9 +369,94 @@ class ParserTab(QWidget):
         self._refresh_rule_list()
         self.rule_list.setCurrentRow(row)
 
+    def _save_test_data_rules(self):
+        rule_name = self.edit_name.text().strip()
+        if not rule_name:
+            QMessageBox.warning(self, "No Rule Name", "Enter a rule name first.")
+            return
+
+        self._test_data_tokens = self._parse_data_tokens(self.edit_data.text())
+        if self._rules:
+            self._rules[0]["rule_name"] = rule_name
+            self._rules[0].setdefault("anchor", "")
+            self._rules[0].setdefault("direction", "right")
+            self._rules[0].setdefault("offset", 1)
+            self._rules[0].setdefault("word_count", 1)
+            self._rules[0].setdefault("page", None)
+            self._rules = [self._rules[0]]
+        else:
+            self._rules = [
+                {
+                    "rule_name": rule_name,
+                    "anchor": "",
+                    "direction": "right",
+                    "offset": 1,
+                    "word_count": 1,
+                    "page": None,
+                }
+            ]
+        self._dirty = True
+        self._persist()
+        self._refresh_rule_list()
+        self.rule_list.setCurrentRow(0)
+
+    def _is_test_mode(self) -> bool:
+        return self.combo_mode.currentText().lower() == "test"
+
+    def _on_mode_changed(self, mode_text: str):
+        is_test_mode = mode_text.lower() == "test"
+        has_rule = self._has_rule_selection()
+        if has_rule:
+            for w in (
+                self.anchor_label,
+                self.edit_anchor,
+                self.direction_label,
+                self.combo_direction,
+                self.offset_label,
+                self.spin_offset,
+                self.word_count_label,
+                self.wc_hint,
+                self.spin_word_count,
+            ):
+                w.setVisible(not is_test_mode)
+
+            self.data_label.setVisible(is_test_mode)
+            self.edit_data.setVisible(is_test_mode)
+            if is_test_mode:
+                self.edit_data.setText(" ".join(self._test_data_tokens))
+        if is_test_mode:
+            self.pdf_label.setText("PDF not required in Test mode")
+            self.btn_load_pdf.setEnabled(False)
+        else:
+            self.btn_load_pdf.setEnabled(True)
+            self.pdf_label.setText(
+                Path(self._pdf_path).name if self._pdf_path else "No PDF loaded"
+            )
+
+    def _parse_data_tokens(self, raw_data: str) -> list[str]:
+        parts = [p.strip() for p in re.split(r"[\s,]+", raw_data) if p.strip()]
+        seen: set[str] = set()
+        tokens: list[str] = []
+        for part in parts:
+            token = part.replace(" ", "_")
+            if token and token not in seen:
+                seen.add(token)
+                tokens.append(token)
+        return tokens
+
     def _persist(self):
         if self._current_file:
-            save_rules(self._rules, self._current_file)
+            if self._is_test_mode():
+                save_rules(
+                    self._rules,
+                    self._current_file,
+                    meta={
+                        "editor_mode": "test",
+                        "test_data": self._test_data_tokens,
+                    },
+                )
+            else:
+                save_rules(self._rules, self._current_file)
             self._dirty = False
 
     def _save_if_dirty(self):
@@ -302,6 +474,22 @@ class ParserTab(QWidget):
             self.pdf_label.setText(Path(path).name)
 
     def _run_rules(self):
+        if self._is_test_mode():
+            if not self._rules:
+                QMessageBox.warning(self, "No Rules", "Add at least one rule.")
+                return
+            data_tokens = self._parse_data_tokens(self.edit_data.text())
+            if not data_tokens:
+                QMessageBox.warning(
+                    self,
+                    "No Data",
+                    "Enter one or more values in Data (space or comma separated).",
+                )
+                return
+            self._test_data_tokens = data_tokens
+            self._show_results([{"data": token} for token in data_tokens])
+            return
+
         if not self._pdf_path:
             QMessageBox.warning(self, "No PDF", "Load a PDF first.")
             return

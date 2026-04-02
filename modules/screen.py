@@ -88,7 +88,7 @@ def click_image(
     timeout: float = 0,
     offset_x: int = 0,
     offset_y: int = 0,
-    move_duration: float = 0.2,
+    move_duration: float = 0,
 ) -> tuple[int, int]:
     """Wait for a target image then move the mouse to it (no click).
 
@@ -123,7 +123,7 @@ def _type_unicode(text: str, interval: float) -> None:
     time.sleep(interval * len(text))
 
 
-def move_to(x: int, y: int, duration: float = 0.2) -> None:
+def move_to(x: int, y: int, duration: float = 0) -> None:
     """Move the mouse to absolute screen coordinates."""
     pyautogui.moveTo(x, y, duration=duration)
 
@@ -837,7 +837,7 @@ def search_text(
     case_sensitive: bool = False,
     timeout: float = 10.0,
     poll_interval: float = 0.8,
-    move_duration: float = 0.2,
+    move_duration: float = 0,
 ) -> tuple[int, int]:
     """Poll-search for *query* via OCR, then move the mouse to the found text.
 

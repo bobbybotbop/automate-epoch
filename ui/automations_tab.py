@@ -38,6 +38,7 @@ ACTION_TYPES = [
     "move_to_text",
     "simple_click",
     "type_value",
+    "sleep",
 ]
 
 ACTION_DESCRIPTIONS = {
@@ -45,6 +46,7 @@ ACTION_DESCRIPTIONS = {
     "move_to_text": "OCR-find text on screen & move mouse",
     "simple_click": "Click at current cursor position",
     "type_value": "Type text into focused field",
+    "sleep": "Pause for a fixed duration (seconds)",
 }
 
 
@@ -215,11 +217,13 @@ class AutomationsTab(QWidget):
         self._editor_search_text = self._make_search_text_editor()
         self._editor_simple_click = self._make_simple_click_editor()
         self._editor_type = self._make_type_editor()
+        self._editor_sleep = self._make_sleep_editor()
 
         self.editor_stack.addWidget(self._editor_click["widget"])        # 0: move_to_image
         self.editor_stack.addWidget(self._editor_search_text["widget"])  # 1: move_to_text
         self.editor_stack.addWidget(self._editor_simple_click["widget"]) # 2: simple_click
         self.editor_stack.addWidget(self._editor_type["widget"])         # 3: type_value
+        self.editor_stack.addWidget(self._editor_sleep["widget"])        # 4: sleep
 
     def _make_click_editor(self) -> dict:
         """Editor for move_to_image: wait for target image then move mouse to it."""
@@ -276,7 +280,7 @@ class AutomationsTab(QWidget):
         spin_move_duration.setRange(0.0, 10.0)
         spin_move_duration.setSingleStep(0.05)
         spin_move_duration.setDecimals(2)
-        spin_move_duration.setValue(0.2)
+        spin_move_duration.setValue(0.0)
         layout.addWidget(spin_move_duration)
 
         layout.addStretch()
@@ -385,7 +389,7 @@ class AutomationsTab(QWidget):
         spin_move_duration.setRange(0.0, 10.0)
         spin_move_duration.setSingleStep(0.05)
         spin_move_duration.setDecimals(2)
-        spin_move_duration.setValue(0.2)
+        spin_move_duration.setValue(0.0)
         layout.addWidget(spin_move_duration)
 
         layout.addStretch()
@@ -422,6 +426,23 @@ class AutomationsTab(QWidget):
             "button": btn_combo,
             "clicks": spin_clicks,
         }
+
+    def _make_sleep_editor(self) -> dict:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(0, 8, 0, 0)
+
+        layout.addWidget(QLabel("Duration (seconds)"))
+        spin_sec = QDoubleSpinBox()
+        spin_sec.setRange(0.0, 3600.0)
+        spin_sec.setSingleStep(0.1)
+        spin_sec.setDecimals(2)
+        spin_sec.setValue(1.0)
+        spin_sec.setToolTip("Pause before the next step.")
+        layout.addWidget(spin_sec)
+
+        layout.addStretch()
+        return {"widget": w, "seconds": spin_sec}
 
     @staticmethod
     def _populate_window_combo(combo: QComboBox) -> None:
@@ -567,6 +588,9 @@ class AutomationsTab(QWidget):
             btn = step.get("button", "left")
             n = step.get("clicks", 1)
             return f"click \u2192 {btn}" + (f" x{n}" if n > 1 else "")
+        if action == "sleep":
+            sec = step.get("seconds", 0)
+            return f"sleep \u2192 {sec}s"
         return action
 
     def _on_step_selected(self, row: int):
@@ -590,7 +614,7 @@ class AutomationsTab(QWidget):
             self._editor_click["offset_x"].setValue(int(step.get("offset_x", 0)))
             self._editor_click["offset_y"].setValue(-int(step.get("offset_y", 0)))
             self._editor_click["timeout"].setValue(int(step.get("timeout", 0)))
-            self._editor_click["move_duration"].setValue(float(step.get("move_duration", 0.2)))
+            self._editor_click["move_duration"].setValue(float(step.get("move_duration", 0)))
             self._set_pick_status("Ready")
         elif action == "type_value":
             self._editor_type["value"].setText(step.get("value", ""))
@@ -609,7 +633,7 @@ class AutomationsTab(QWidget):
             )
             self._editor_search_text["timeout"].setValue(step.get("timeout", 10))
             self._editor_search_text["move_duration"].setValue(
-                float(step.get("move_duration", 0.2))
+                float(step.get("move_duration", 0))
             )
         elif action == "simple_click":
             _set_combo(
@@ -617,6 +641,8 @@ class AutomationsTab(QWidget):
                 step.get("button", "left"),
             )
             self._editor_simple_click["clicks"].setValue(step.get("clicks", 1))
+        elif action == "sleep":
+            self._editor_sleep["seconds"].setValue(float(step.get("seconds", 1)))
 
     def _on_action_type_changed(self, idx: int):
         self.editor_stack.setCurrentIndex(idx)
@@ -692,6 +718,8 @@ class AutomationsTab(QWidget):
         elif action == "simple_click":
             step["button"] = self._editor_simple_click["button"].currentText()
             step["clicks"] = self._editor_simple_click["clicks"].value()
+        elif action == "sleep":
+            step["seconds"] = self._editor_sleep["seconds"].value()
 
         steps[row] = step
         self._refresh_step_list()

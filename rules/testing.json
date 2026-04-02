@@ -1,0 +1,18 @@
+{
+  "rules": [
+    {
+      "rule_name": "sidebar",
+      "anchor": "",
+      "direction": "right",
+      "offset": 1,
+      "word_count": 2,
+      "page": null
+    }
+  ],
+  "editor_mode": "test",
+  "test_data": [
+    "automations",
+    "build",
+    "logs"
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "name": "sidebarClicker",
+  "steps": [
+    {
+      "action": "move_to_text",
+      "query": "{{sidebar}}",
+      "match": "contains",
+      "case_sensitive": false,
+      "timeout": 10,
+      "move_duration": 0.0
+    },
+    {
+      "action": "simple_click",
+      "button": "left",
+      "clicks": 1
+    }
+  ]
+}

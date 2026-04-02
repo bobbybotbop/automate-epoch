@@ -122,6 +122,11 @@ class AutomationRunner(QThread):
                 screen.simple_click(button=button, clicks=clicks)
                 return "ok", f"{button} click" + (f" x{clicks}" if clicks > 1 else "")
 
+            elif action == "sleep":
+                sec = max(0.0, float(step.get("seconds", 0)))
+                time.sleep(sec)
+                return "ok", f"sleep {sec:.2f}s"
+
             else:
                 return "skip", f"unknown action '{action}'"
 
@@ -141,7 +146,7 @@ class AutomationRunner(QThread):
         ox = int(step.get("offset_x", 0))
         oy = int(step.get("offset_y", 0))
         timeout = step.get("timeout", 0)
-        move_duration = float(step.get("move_duration", 0.2))
+        move_duration = float(step.get("move_duration", 0))
         suffix = f" offset({ox},{oy})" if ox or oy else ""
 
         coords = screen.click_image(
@@ -165,7 +170,7 @@ class AutomationRunner(QThread):
         match_mode = step.get("match", "contains")
         case_sensitive = step.get("case_sensitive", False)
         timeout = step.get("timeout", 10)
-        move_duration = float(step.get("move_duration", 0.2))
+        move_duration = float(step.get("move_duration", 0))
 
         coords = screen.search_text(
             query,
