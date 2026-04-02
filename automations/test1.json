@@ -5,9 +5,10 @@
       "action": "move_to_image",
       "target": "youtub.png",
       "confidence": 0.85,
-      "offset_x": 0,
-      "offset_y": 0,
-      "timeout": 0
+      "offset_x": 174,
+      "offset_y": 1,
+      "timeout": 0,
+      "move_duration": 0
     },
     {
       "action": "simple_click",

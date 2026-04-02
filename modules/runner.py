@@ -141,6 +141,7 @@ class AutomationRunner(QThread):
         ox = int(step.get("offset_x", 0))
         oy = int(step.get("offset_y", 0))
         timeout = step.get("timeout", 0)
+        move_duration = float(step.get("move_duration", 0.2))
         suffix = f" offset({ox},{oy})" if ox or oy else ""
 
         coords = screen.click_image(
@@ -149,6 +150,7 @@ class AutomationRunner(QThread):
             timeout=timeout,
             offset_x=ox,
             offset_y=oy,
+            move_duration=move_duration,
         )
         return "ok", f"moved to {Path(target).name}{suffix} at ({coords[0]},{coords[1]})"
 
@@ -163,6 +165,7 @@ class AutomationRunner(QThread):
         match_mode = step.get("match", "contains")
         case_sensitive = step.get("case_sensitive", False)
         timeout = step.get("timeout", 10)
+        move_duration = float(step.get("move_duration", 0.2))
 
         coords = screen.search_text(
             query,
@@ -170,6 +173,7 @@ class AutomationRunner(QThread):
             match_mode=match_mode,
             case_sensitive=case_sensitive,
             timeout=timeout,
+            move_duration=move_duration,
         )
         return "ok", f"moved to '{query[:30]}' at ({coords[0]},{coords[1]})"
 

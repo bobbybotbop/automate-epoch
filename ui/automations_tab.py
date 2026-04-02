@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 from pathlib import Path
+from ctypes import wintypes
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QShowEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -17,6 +19,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QSplitter,
@@ -26,6 +29,9 @@ from PyQt6.QtWidgets import (
 )
 
 import pygetwindow as gw
+
+from modules import screen
+from ui.targets_tab import DetectionOverlay
 
 ACTION_TYPES = [
     "move_to_image",
@@ -67,6 +73,16 @@ class AutomationsTab(QWidget):
         self.automations_dir = automations_dir
         self.targets_dir = targets_dir
         self.rules_dir = rules_dir
+        self._offset_pick_poll_timer: QTimer | None = None
+        self._offset_pick_deadline_timer: QTimer | None = None
+        self._offset_pick_center: tuple[int, int] | None = None
+        self._offset_pick_step_row = -1
+        self._offset_pick_target_path: Path | None = None
+        self._offset_pick_confidence = 0.85
+        self._offset_pick_overlay: DetectionOverlay | None = None
+        self._offset_pick_click_timer: QTimer | None = None
+        self._offset_pick_prev_left_down = False
+        self._offset_pick_prev_right_down = False
         self._current_file: Path | None = None
         self._automation: dict = {"name": "", "steps": []}
         self._build_ui()
@@ -239,12 +255,29 @@ class AutomationsTab(QWidget):
         offset_row.addWidget(spin_oy)
         layout.addLayout(offset_row)
 
+        pick_row = QHBoxLayout()
+        btn_pick = QPushButton("Pick Offset Visually")
+        btn_pick.clicked.connect(self._start_visual_offset_pick)
+        pick_row.addWidget(btn_pick)
+        pick_status = QLabel("Ready")
+        pick_status.setWordWrap(True)
+        pick_row.addWidget(pick_status, 1)
+        layout.addLayout(pick_row)
+
         layout.addWidget(QLabel("Timeout (seconds, 0 = wait forever)"))
         spin_timeout = QSpinBox()
         spin_timeout.setRange(0, 9999)
         spin_timeout.setValue(0)
         spin_timeout.setToolTip("0 means wait indefinitely until the image appears")
         layout.addWidget(spin_timeout)
+
+        layout.addWidget(QLabel("Move Duration (seconds, 0 = instant teleport)"))
+        spin_move_duration = QDoubleSpinBox()
+        spin_move_duration.setRange(0.0, 10.0)
+        spin_move_duration.setSingleStep(0.05)
+        spin_move_duration.setDecimals(2)
+        spin_move_duration.setValue(0.2)
+        layout.addWidget(spin_move_duration)
 
         layout.addStretch()
         return {
@@ -253,7 +286,10 @@ class AutomationsTab(QWidget):
             "confidence": spin_conf,
             "offset_x": spin_ox,
             "offset_y": spin_oy,
+            "pick_button": btn_pick,
+            "pick_status": pick_status,
             "timeout": spin_timeout,
+            "move_duration": spin_move_duration,
         }
 
     def _make_type_editor(self) -> dict:
@@ -344,6 +380,14 @@ class AutomationsTab(QWidget):
         spin_timeout.setValue(10)
         layout.addWidget(spin_timeout)
 
+        layout.addWidget(QLabel("Move Duration (seconds, 0 = instant teleport)"))
+        spin_move_duration = QDoubleSpinBox()
+        spin_move_duration.setRange(0.0, 10.0)
+        spin_move_duration.setSingleStep(0.05)
+        spin_move_duration.setDecimals(2)
+        spin_move_duration.setValue(0.2)
+        layout.addWidget(spin_move_duration)
+
         layout.addStretch()
         return {
             "widget": w,
@@ -353,6 +397,7 @@ class AutomationsTab(QWidget):
             "match": match_combo,
             "case_sensitive": case_cb,
             "timeout": spin_timeout,
+            "move_duration": spin_move_duration,
         }
 
     def _make_simple_click_editor(self) -> dict:
@@ -545,6 +590,8 @@ class AutomationsTab(QWidget):
             self._editor_click["offset_x"].setValue(int(step.get("offset_x", 0)))
             self._editor_click["offset_y"].setValue(-int(step.get("offset_y", 0)))
             self._editor_click["timeout"].setValue(int(step.get("timeout", 0)))
+            self._editor_click["move_duration"].setValue(float(step.get("move_duration", 0.2)))
+            self._set_pick_status("Ready")
         elif action == "type_value":
             self._editor_type["value"].setText(step.get("value", ""))
         elif action == "move_to_text":
@@ -561,6 +608,9 @@ class AutomationsTab(QWidget):
                 step.get("case_sensitive", False)
             )
             self._editor_search_text["timeout"].setValue(step.get("timeout", 10))
+            self._editor_search_text["move_duration"].setValue(
+                float(step.get("move_duration", 0.2))
+            )
         elif action == "simple_click":
             _set_combo(
                 self._editor_simple_click["button"],
@@ -627,6 +677,7 @@ class AutomationsTab(QWidget):
             step["offset_x"] = self._editor_click["offset_x"].value()
             step["offset_y"] = -self._editor_click["offset_y"].value()
             step["timeout"] = self._editor_click["timeout"].value()
+            step["move_duration"] = self._editor_click["move_duration"].value()
         elif action == "type_value":
             step["value"] = self._editor_type["value"].text()
         elif action == "move_to_text":
@@ -637,6 +688,7 @@ class AutomationsTab(QWidget):
             step["match"] = self._editor_search_text["match"].currentText()
             step["case_sensitive"] = self._editor_search_text["case_sensitive"].isChecked()
             step["timeout"] = self._editor_search_text["timeout"].value()
+            step["move_duration"] = self._editor_search_text["move_duration"].value()
         elif action == "simple_click":
             step["button"] = self._editor_simple_click["button"].currentText()
             step["clicks"] = self._editor_simple_click["clicks"].value()
@@ -649,6 +701,153 @@ class AutomationsTab(QWidget):
     def _on_error_strategy_changed(self, text: str):
         self._automation["on_error"] = text
         self._persist()
+
+    @staticmethod
+    def _is_mouse_down(vk_code: int) -> bool:
+        return bool(ctypes.windll.user32.GetAsyncKeyState(vk_code) & 0x8000)
+
+    @staticmethod
+    def _cursor_pos() -> tuple[int, int] | None:
+        point = wintypes.POINT()
+        if not ctypes.windll.user32.GetCursorPos(ctypes.byref(point)):
+            return None
+        return (int(point.x), int(point.y))
+
+    def _set_pick_status(self, text: str) -> None:
+        self._editor_click["pick_status"].setText(text)
+
+    def _start_visual_offset_pick(self) -> None:
+        if self._offset_pick_poll_timer is not None:
+            self._set_pick_status("Offset pick already in progress.")
+            return
+        row = self.step_list.currentRow()
+        if row < 0:
+            self._set_pick_status("Select a step first.")
+            return
+        if self.combo_action.currentData() != "move_to_image":
+            self._set_pick_status("Visual picker is only available for move_to_image.")
+            return
+        target_name = self._editor_click["target"].currentText().strip()
+        if not target_name:
+            self._set_pick_status("Choose a target image first.")
+            return
+        target_path = self.targets_dir / target_name
+        if not target_path.exists():
+            self._set_pick_status(f"Target not found: {target_name}")
+            return
+
+        confidence = float(self._editor_click["confidence"].value())
+        timeout = int(self._editor_click["timeout"].value())
+        detect_timeout_ms = (timeout if timeout > 0 else 10) * 1000
+        self._offset_pick_target_path = target_path
+        self._offset_pick_confidence = confidence
+        self._offset_pick_step_row = row
+        self._set_pick_status("Searching for image on screen...")
+        self._editor_click["pick_button"].setEnabled(False)
+        self._offset_pick_overlay = DetectionOverlay()
+        self._offset_pick_poll_timer = QTimer(self)
+        self._offset_pick_poll_timer.setInterval(500)
+        self._offset_pick_poll_timer.timeout.connect(self._poll_visual_offset_find)
+        self._offset_pick_poll_timer.start()
+        self._offset_pick_deadline_timer = QTimer(self)
+        self._offset_pick_deadline_timer.setSingleShot(True)
+        self._offset_pick_deadline_timer.setInterval(detect_timeout_ms)
+        self._offset_pick_deadline_timer.timeout.connect(self._on_offset_pick_find_timeout)
+        self._offset_pick_deadline_timer.start()
+        self._poll_visual_offset_find()
+
+    def _stop_visual_offset_pick(self) -> None:
+        if self._offset_pick_poll_timer is not None:
+            self._offset_pick_poll_timer.stop()
+            self._offset_pick_poll_timer.deleteLater()
+            self._offset_pick_poll_timer = None
+        if self._offset_pick_deadline_timer is not None:
+            self._offset_pick_deadline_timer.stop()
+            self._offset_pick_deadline_timer.deleteLater()
+            self._offset_pick_deadline_timer = None
+        if self._offset_pick_click_timer is not None:
+            self._offset_pick_click_timer.stop()
+            self._offset_pick_click_timer.deleteLater()
+            self._offset_pick_click_timer = None
+        if self._offset_pick_overlay is not None:
+            self._offset_pick_overlay.teardown()
+            self._offset_pick_overlay = None
+        self._offset_pick_target_path = None
+        self._offset_pick_center = None
+        self._editor_click["pick_button"].setEnabled(True)
+
+    def _on_offset_pick_find_timeout(self) -> None:
+        self._set_pick_status("Image not found in time. Try lower confidence.")
+        self._stop_visual_offset_pick()
+
+    def _poll_visual_offset_find(self) -> None:
+        if self._offset_pick_target_path is None:
+            return
+        box = screen.find_image_box(self._offset_pick_target_path, self._offset_pick_confidence)
+        if self._offset_pick_overlay is not None:
+            self._offset_pick_overlay.update_box(box)
+        if box is None:
+            return
+        left, top, width, height = box
+        self._offset_pick_center = (left + width // 2, top + height // 2)
+        if self._offset_pick_poll_timer is not None:
+            self._offset_pick_poll_timer.stop()
+        if self._offset_pick_deadline_timer is not None:
+            self._offset_pick_deadline_timer.stop()
+        self._set_pick_status("Waiting for click... left=save, right=cancel")
+        self._offset_pick_prev_left_down = self._is_mouse_down(0x01)
+        self._offset_pick_prev_right_down = self._is_mouse_down(0x02)
+        self._offset_pick_click_timer = QTimer(self)
+        self._offset_pick_click_timer.setInterval(20)
+        self._offset_pick_click_timer.timeout.connect(self._offset_pick_click_tick)
+        self._offset_pick_click_timer.start()
+
+    def _offset_pick_click_tick(self) -> None:
+        left_down = self._is_mouse_down(0x01)
+        right_down = self._is_mouse_down(0x02)
+        left_pressed = left_down and not self._offset_pick_prev_left_down
+        right_pressed = right_down and not self._offset_pick_prev_right_down
+        self._offset_pick_prev_left_down = left_down
+        self._offset_pick_prev_right_down = right_down
+
+        if right_pressed:
+            self._set_pick_status("Offset pick cancelled.")
+            self._stop_visual_offset_pick()
+            return
+        if not left_pressed:
+            return
+
+        pos = self._cursor_pos()
+        center = self._offset_pick_center
+        self._stop_visual_offset_pick()
+        if pos is None or center is None:
+            self._set_pick_status("Could not read cursor position.")
+            return
+
+        offset_x = int(pos[0] - center[0])
+        offset_y = int(pos[1] - center[1])
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Click Offset",
+            "Save click offset for this step?\n\n"
+            f"Image center: ({center[0]}, {center[1]})\n"
+            f"Clicked point: ({pos[0]}, {pos[1]})\n"
+            f"Offset X: {offset_x}\n"
+            f"Offset Y: {offset_y}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            self._set_pick_status("Offset pick cancelled.")
+            return
+
+        if self.step_list.currentRow() != self._offset_pick_step_row:
+            self.step_list.setCurrentRow(self._offset_pick_step_row)
+        self._editor_click["offset_x"].setValue(offset_x)
+        self._editor_click["offset_y"].setValue(offset_y)
+        self._save_step()
+        self.step_list.setCurrentRow(self._offset_pick_step_row)
+        self._set_pick_status(f"Saved offset ({offset_x}, {offset_y}).")
 
     def _persist(self):
         if self._current_file:
