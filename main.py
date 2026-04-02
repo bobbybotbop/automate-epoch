@@ -82,6 +82,9 @@ LOGS_DIR = BASE_DIR / "logs"
 for d in (AUTOMATIONS_DIR, TARGETS_DIR, RULES_DIR, LOGS_DIR):
     d.mkdir(exist_ok=True)
 
+from modules.detection_debug import setup_detection_logging
+setup_detection_logging(LOGS_DIR)
+
 
 def _migrate_automation_actions(automations_dir: Path) -> None:
     """One-time idempotent rewrite of legacy action names in automation files."""

@@ -27,9 +27,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+import logging
+import sys
+import traceback
+
 from modules.capture import start_capture
 from modules import screen
 from ui.toast import ToastType, show_toast
+
+_log = logging.getLogger("flowdesk.detection")
 
 META_FILENAME = "meta.json"
 
@@ -299,7 +305,7 @@ class TargetsTab(QWidget):
         tl.addLayout(row2)
 
         hint = QLabel(
-            "Searches the full screen (all monitors), like image target tests."
+            "Searches the same screen area as image target tests (PyAutoGUI capture)."
         )
         hint.setObjectName("subtext")
         hint.setWordWrap(True)
@@ -394,6 +400,10 @@ class TargetsTab(QWidget):
         self._test_path = path
         self._test_confidence = confidence
         self._test_name = path.stem
+        _log.info(
+            "test_target  mode=image  frozen=%s  path=%s  exists=%s  conf=%.2f",
+            getattr(sys, "frozen", False), path, path.is_file(), confidence,
+        )
         if self.parent_window:
             self.parent_window.showMinimized()
         QTimer.singleShot(400, self._start_live_test)
@@ -465,6 +475,10 @@ class TargetsTab(QWidget):
         self._text_test_match = match_mode
         self._text_test_case = case_sensitive
         self._test_name = query
+        _log.info(
+            "test_text  mode=text  frozen=%s  query=%r  match=%s  case=%s",
+            getattr(sys, "frozen", False), query, match_mode, case_sensitive,
+        )
         if self.parent_window:
             self.parent_window.showMinimized()
         QTimer.singleShot(400, self._start_live_test)
@@ -480,6 +494,7 @@ class TargetsTab(QWidget):
             )
         except Exception as exc:
             box = None
+            _log.error("poll_text_tick error:\n%s", traceback.format_exc())
             if self._test_toast:
                 self._test_toast.update_message(str(exc), ToastType.ERROR)
 

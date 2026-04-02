@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 )
 
 from modules.app_paths import application_base_dir
+from modules.build_requirements import missing_build_inputs
 from ui.toast import ToastType, show_toast
 
 BASE_DIR = application_base_dir()
@@ -166,6 +167,18 @@ class ImportExportTab(QWidget):
                 show_toast("Install PyInstaller to build an EXE", ToastType.WARNING)
             return
 
+        missing = missing_build_inputs(BASE_DIR)
+        if missing:
+            QMessageBox.critical(
+                self,
+                "Cannot build — missing files",
+                "The following required files are missing:\n\n"
+                + "\n".join(f"  • {m}" for m in missing)
+                + "\n\nPlace main.py and a complete Tesseract-OCR portable folder "
+                "in the project directory (same layout as development).",
+            )
+            return
+
         if (
             self._build_process is not None
             and self._build_process.state() != QProcess.ProcessState.NotRunning
@@ -185,6 +198,8 @@ class ImportExportTab(QWidget):
             "--onefile", "--windowed",
             "--noupx",
             "--hidden-import", "pytesseract",
+            "--hidden-import", "PIL.ImageGrab",
+            "--collect-all", "cv2",
             "--add-data", f"Tesseract-OCR{data_sep}Tesseract-OCR",
             "--name", "FlowDesk",
             "main.py",

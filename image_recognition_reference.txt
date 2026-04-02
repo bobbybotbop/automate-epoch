@@ -1,0 +1,169 @@
+================================================================================
+IMAGE RECOGNITION LOGIC — REFERENCE COPY
+================================================================================
+Snapshot of the project’s image-based matching (template screenshots via
+PyAutoGUI). Source files: modules/screen.py, modules/runner.py.
+Generated as a static reference; edit the .py sources for real changes.
+================================================================================
+
+--- modules/screen.py (excerpt: PyAutoGUI config + image helpers) ---
+
+import pyautogui
+
+pyautogui.FAILSAFE = True
+pyautogui.PAUSE = 0.1
+
+
+class TargetNotFoundError(Exception):
+    """Raised when a screen target image cannot be located within the timeout."""
+
+    def __init__(self, target: str, timeout: float):
+        self.target = target
+        self.timeout = timeout
+        super().__init__(
+            f"Target '{target}' not found on screen after {timeout:.1f}s"
+        )
+
+
+def find_image(
+    target_path: str | Path, confidence: float = 0.85
+) -> tuple[int, int] | None:
+    """Single non-blocking screen check. Returns (x, y) center or None."""
+    try:
+        location = pyautogui.locateOnScreen(str(target_path), confidence=confidence)
+    except pyautogui.ImageNotFoundException:
+        return None
+    if location is None:
+        return None
+    center = pyautogui.center(location)
+    return (int(center.x), int(center.y))
+
+
+def find_image_box(
+    target_path: str | Path, confidence: float = 0.85
+) -> tuple[int, int, int, int] | None:
+    """Single non-blocking screen check. Returns (left, top, width, height) or None."""
+    try:
+        location = pyautogui.locateOnScreen(str(target_path), confidence=confidence)
+    except pyautogui.ImageNotFoundException:
+        return None
+    if location is None:
+        return None
+    return (int(location.left), int(location.top), int(location.width), int(location.height))
+
+
+def wait_for_image(
+    target_path: str | Path,
+    confidence: float = 0.85,
+    timeout: float = 0,
+    poll_interval: float = 0.5,
+    on_search_begin: Callable[[], None] | None = None,
+    on_found: Callable[[], None] | None = None,
+) -> tuple[int, int]:
+    """Poll the screen until the target image appears. Returns (x, y) center.
+
+    *timeout* in seconds.  ``0`` (default) means wait indefinitely.
+    Raises TargetNotFoundError if a finite timeout elapses without a match.
+    """
+    if on_search_begin:
+        on_search_begin()
+    infinite = timeout <= 0
+    deadline = None if infinite else time.monotonic() + timeout
+    while True:
+        coords = find_image(target_path, confidence)
+        if coords is not None:
+            if on_found:
+                on_found()
+            return coords
+        if not infinite and time.monotonic() >= deadline:
+            raise TargetNotFoundError(str(target_path), timeout)
+        time.sleep(poll_interval)
+
+
+def click_image(
+    target_path: str | Path,
+    confidence: float = 0.85,
+    timeout: float = 0,
+    offset_x: int = 0,
+    offset_y: int = 0,
+    move_duration: float = 0,
+    on_search_begin: Callable[[], None] | None = None,
+    on_found: Callable[[], None] | None = None,
+) -> tuple[int, int]:
+    """Wait for a target image then move the mouse to it (no click).
+
+    Polls the screen until the image is found, then moves the cursor to
+    the image center (shifted by *offset_x* / *offset_y*).
+
+    *timeout* in seconds.  ``0`` (default) means wait indefinitely.
+    Returns the (x, y) coordinates the mouse was moved to.
+    Raises TargetNotFoundError if a finite timeout elapses without a match.
+    """
+    coords = wait_for_image(
+        target_path, confidence, timeout,
+        on_search_begin=on_search_begin, on_found=on_found,
+    )
+    dest_x = coords[0] + offset_x
+    dest_y = coords[1] + offset_y
+    move_to(dest_x, dest_y, duration=move_duration)
+    return (dest_x, dest_y)
+
+
+--- modules/runner.py (excerpt: automation step + target resolution) ---
+
+    def _execute_click_image(self, step: dict) -> tuple[str, str]:
+        """Wait for target image then move the mouse to it."""
+        target = self._resolve_target(step.get("target", ""))
+        conf = self._get_confidence(step)
+        ox = int(step.get("offset_x", 0))
+        oy = int(step.get("offset_y", 0))
+        timeout = step.get("timeout", 0)
+        move_duration = float(step.get("move_duration", 0))
+        suffix = f" offset({ox},{oy})" if ox or oy else ""
+        label = Path(target).name
+
+        coords = screen.click_image(
+            target,
+            confidence=conf,
+            timeout=timeout,
+            offset_x=ox,
+            offset_y=oy,
+            move_duration=move_duration,
+            on_search_begin=lambda: self.step_progress.emit("search", f"Looking for {label}"),
+            on_found=lambda: self.step_progress.emit("found", f"Found {label}"),
+        )
+        return "ok", f"moved to {label}{suffix} at ({coords[0]},{coords[1]})"
+
+    def _resolve_target(self, target_name: str) -> str:
+        name = str(target_name).strip()
+        if not name:
+            raise ValueError("target image is empty; choose a .png in the automation step")
+
+        candidates = [self.targets_dir / name]
+        if not name.lower().endswith(".png"):
+            candidates.append(self.targets_dir / f"{name}.png")
+
+        for path in candidates:
+            if path.exists() and path.is_file():
+                return str(path)
+
+        raise FileNotFoundError(
+            f"target image not found: '{name}' (looked in {self.targets_dir})"
+        )
+
+    def _get_confidence(self, step: dict) -> float:
+        if "confidence" in step:
+            return step["confidence"]
+        target_name = step.get("target", "")
+        stem = Path(target_name).stem
+        return self.confidence_meta.get(stem, 0.85)
+
+================================================================================
+NOTES
+================================================================================
+- Matching uses PyAutoGUI’s locateOnScreen(..., confidence=...) (OpenCV-backed
+  when confidence is set; requires opencv-python).
+- UI tests and offset picker use screen.find_image_box() (same locate call,
+  returns bounding box instead of center).
+- Text-on-screen search is separate (Tesseract OCR in screen.py); not included
+  here.

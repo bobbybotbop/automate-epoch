@@ -2,10 +2,16 @@
 
 Provides a fullscreen translucent overlay where the user draws a rectangle
 to capture a UI element, names it, and saves it to the targets directory.
+
+Region pixels must match :func:`PIL.ImageGrab.grab` with ``all_screens=True``
+(the same bitmap space as ``modules.screen`` template search). Widget-local
+coordinates × a single DPR are wrong when the primary monitor is not at the
+origin of the virtual desktop or when per-monitor DPI differs.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Callable
 
@@ -13,6 +19,43 @@ from PIL import ImageGrab
 from PyQt6.QtCore import QPoint, QRect, Qt, QTimer
 from PyQt6.QtGui import QColor, QCursor, QPainter, QPen
 from PyQt6.QtWidgets import QApplication, QInputDialog, QWidget
+
+
+def _logical_global_rect_to_grab_bbox(
+    left: int, top: int, right: int, bottom: int
+) -> tuple[int, int, int, int]:
+    """Map Qt global *logical* rect to Pillow ``bbox`` (physical virtual desktop).
+
+    Pillow crops the all-screens bitmap using absolute physical coordinates
+    (see ``ImageGrab`` win32 path: ``im.crop((left - x0, ...))``).
+    """
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        pt_tl = wintypes.POINT(left, top)
+        pt_br = wintypes.POINT(right, bottom)
+        fn = getattr(user32, "LogicalToPhysicalPointForPerMonitorDPI", None)
+        if fn is not None:
+            fn(ctypes.byref(pt_tl))
+            fn(ctypes.byref(pt_br))
+        else:
+            user32.LogicalToPhysicalPoint(ctypes.byref(pt_tl))
+            user32.LogicalToPhysicalPoint(ctypes.byref(pt_br))
+        return (pt_tl.x, pt_tl.y, pt_br.x, pt_br.y)
+
+    # Non-Windows: approximate with one scale (virtual origin often 0,0)
+    cx = (left + right) // 2
+    cy = (top + bottom) // 2
+    screen = QApplication.screenAt(QPoint(cx, cy)) or QApplication.primaryScreen()
+    r = float(screen.devicePixelRatio()) if screen else 1.0
+    return (
+        int(round(left * r)),
+        int(round(top * r)),
+        int(round(right * r)),
+        int(round(bottom * r)),
+    )
 
 
 class CaptureOverlay(QWidget):
@@ -49,10 +92,14 @@ class CaptureOverlay(QWidget):
         QTimer.singleShot(300, self._show_overlay)
 
     def _show_overlay(self) -> None:
-        screen = QApplication.primaryScreen()
-        if screen:
-            geo = screen.geometry()
-            self.setGeometry(geo)
+        screens = QApplication.screens()
+        if screens:
+            vr = QRect()
+            for s in screens:
+                vr = vr.united(s.geometry())
+            self.setGeometry(vr)
+        elif QApplication.primaryScreen():
+            self.setGeometry(QApplication.primaryScreen().geometry())
         self.showFullScreen()
         self.activateWindow()
 
@@ -103,20 +150,15 @@ class CaptureOverlay(QWidget):
 
         self.hide()
 
-        screen = QApplication.primaryScreen()
-        if screen:
-            ratio = screen.devicePixelRatio()
-        else:
-            ratio = 1.0
+        tlg = self.mapToGlobal(rect.topLeft())
+        brg = self.mapToGlobal(rect.bottomRight())
+        left = min(tlg.x(), brg.x())
+        top = min(tlg.y(), brg.y())
+        right = max(tlg.x(), brg.x())
+        bottom = max(tlg.y(), brg.y())
 
-        bbox = (
-            int(rect.x() * ratio),
-            int(rect.y() * ratio),
-            int((rect.x() + rect.width()) * ratio),
-            int((rect.y() + rect.height()) * ratio),
-        )
-
-        img = ImageGrab.grab(bbox=bbox)
+        bbox = _logical_global_rect_to_grab_bbox(left, top, right, bottom)
+        img = ImageGrab.grab(bbox=bbox, all_screens=True)
 
         name, ok = QInputDialog.getText(
             None, "Name Target", "Enter a name for this target:"

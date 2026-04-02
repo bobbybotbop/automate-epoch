@@ -181,7 +181,7 @@ class AutomationRunner(QThread):
         return "ok", f"moved to {label}{suffix} at ({coords[0]},{coords[1]})"
 
     def _execute_search_by_text(self, step: dict, record: dict) -> tuple[str, str]:
-        """OCR-search for text on screen (full desktop by default) and move the mouse."""
+        """OCR-search for text on screen (same capture as image search by default) and move the mouse."""
         query = self._inject_variables(step.get("query", ""), record)
         if not query.strip():
             return "skip", "search query is empty"
@@ -192,7 +192,10 @@ class AutomationRunner(QThread):
         case_sensitive = step.get("case_sensitive", False)
         timeout = step.get("timeout", 10)
         move_duration = float(step.get("move_duration", 0))
+        ox = int(step.get("offset_x", 0))
+        oy = int(step.get("offset_y", 0))
         snippet = query[:30]
+        suffix = f" offset({ox},{oy})" if ox or oy else ""
 
         coords = screen.search_text(
             query,
@@ -200,11 +203,13 @@ class AutomationRunner(QThread):
             match_mode=match_mode,
             case_sensitive=case_sensitive,
             timeout=timeout,
+            offset_x=ox,
+            offset_y=oy,
             move_duration=move_duration,
             on_search_begin=lambda: self.step_progress.emit("search", f"Looking for '{snippet}'"),
             on_found=lambda: self.step_progress.emit("found", f"Found '{snippet}'"),
         )
-        return "ok", f"moved to '{snippet}' at ({coords[0]},{coords[1]})"
+        return "ok", f"moved to '{snippet}'{suffix} at ({coords[0]},{coords[1]})"
 
     def _resolve_target(self, target_name: str) -> str:
         name = str(target_name).strip()

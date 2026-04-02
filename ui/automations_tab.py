@@ -85,6 +85,12 @@ class AutomationsTab(QWidget):
         self._offset_pick_click_timer: QTimer | None = None
         self._offset_pick_prev_left_down = False
         self._offset_pick_prev_right_down = False
+        self._offset_pick_mode: str | None = None
+        self._offset_pick_text_query: str = ""
+        self._offset_pick_text_region: tuple[int, int, int, int] | None = None
+        self._offset_pick_text_match: str = "contains"
+        self._offset_pick_text_case: bool = False
+        self._active_pick_status_label: QLabel | None = None
         self._current_file: Path | None = None
         self._automation: dict = {"name": "", "steps": []}
         self._build_ui()
@@ -268,20 +274,26 @@ class AutomationsTab(QWidget):
         pick_row.addWidget(pick_status, 1)
         layout.addLayout(pick_row)
 
-        layout.addWidget(QLabel("Timeout (seconds, 0 = wait forever)"))
+        timing_row = QHBoxLayout()
+        timing_row.addWidget(QLabel("Timeout (s)"))
         spin_timeout = QSpinBox()
         spin_timeout.setRange(0, 9999)
         spin_timeout.setValue(0)
-        spin_timeout.setToolTip("0 means wait indefinitely until the image appears")
-        layout.addWidget(spin_timeout)
-
-        layout.addWidget(QLabel("Move Duration (seconds, 0 = instant teleport)"))
+        spin_timeout.setToolTip(
+            "Seconds to wait for the image (0 = wait indefinitely until it appears)"
+        )
+        timing_row.addWidget(spin_timeout)
+        timing_row.addSpacing(12)
+        timing_row.addWidget(QLabel("Move duration (s)"))
         spin_move_duration = QDoubleSpinBox()
         spin_move_duration.setRange(0.0, 10.0)
         spin_move_duration.setSingleStep(0.05)
         spin_move_duration.setDecimals(2)
         spin_move_duration.setValue(0.0)
-        layout.addWidget(spin_move_duration)
+        spin_move_duration.setToolTip("0 = instant mouse move (teleport)")
+        timing_row.addWidget(spin_move_duration)
+        timing_row.addStretch()
+        layout.addLayout(timing_row)
 
         layout.addStretch()
         return {
@@ -361,7 +373,7 @@ class AutomationsTab(QWidget):
         win_combo = QComboBox()
         win_combo.setEditable(True)
         win_combo.setToolTip(
-            "Leave empty to search the full screen (all monitors). "
+            "Leave empty to use the same full-screen capture as image matching. "
             "If set, OCR is limited to that window."
         )
         layout.addWidget(win_combo)
@@ -378,19 +390,49 @@ class AutomationsTab(QWidget):
         case_cb = QCheckBox("Case sensitive")
         layout.addWidget(case_cb)
 
-        layout.addWidget(QLabel("Timeout (seconds)"))
+        layout.addWidget(QLabel("Offset (pixels from text match center)"))
+        offset_row = QHBoxLayout()
+        offset_row.addWidget(QLabel("X"))
+        st_ox = QSpinBox()
+        st_ox.setRange(-2000, 2000)
+        st_ox.setValue(0)
+        st_ox.setToolTip("Positive = right of match center")
+        offset_row.addWidget(st_ox)
+        offset_row.addWidget(QLabel("Y"))
+        st_oy = QSpinBox()
+        st_oy.setRange(-2000, 2000)
+        st_oy.setValue(0)
+        st_oy.setToolTip("Positive = below match center")
+        offset_row.addWidget(st_oy)
+        layout.addLayout(offset_row)
+
+        st_pick_row = QHBoxLayout()
+        st_btn_pick = QPushButton("Pick Offset Visually")
+        st_btn_pick.clicked.connect(self._start_visual_offset_pick)
+        st_pick_row.addWidget(st_btn_pick)
+        st_pick_status = QLabel("Ready")
+        st_pick_status.setWordWrap(True)
+        st_pick_row.addWidget(st_pick_status, 1)
+        layout.addLayout(st_pick_row)
+
+        timing_row = QHBoxLayout()
+        timing_row.addWidget(QLabel("Timeout (s)"))
         spin_timeout = QSpinBox()
         spin_timeout.setRange(1, 120)
         spin_timeout.setValue(10)
-        layout.addWidget(spin_timeout)
-
-        layout.addWidget(QLabel("Move Duration (seconds, 0 = instant teleport)"))
+        spin_timeout.setToolTip("Seconds to wait for matching text on screen")
+        timing_row.addWidget(spin_timeout)
+        timing_row.addSpacing(12)
+        timing_row.addWidget(QLabel("Move duration (s)"))
         spin_move_duration = QDoubleSpinBox()
         spin_move_duration.setRange(0.0, 10.0)
         spin_move_duration.setSingleStep(0.05)
         spin_move_duration.setDecimals(2)
         spin_move_duration.setValue(0.0)
-        layout.addWidget(spin_move_duration)
+        spin_move_duration.setToolTip("0 = instant mouse move (teleport)")
+        timing_row.addWidget(spin_move_duration)
+        timing_row.addStretch()
+        layout.addLayout(timing_row)
 
         layout.addStretch()
         return {
@@ -400,6 +442,10 @@ class AutomationsTab(QWidget):
             "window_title": win_combo,
             "match": match_combo,
             "case_sensitive": case_cb,
+            "offset_x": st_ox,
+            "offset_y": st_oy,
+            "pick_button": st_btn_pick,
+            "pick_status": st_pick_status,
             "timeout": spin_timeout,
             "move_duration": spin_move_duration,
         }
@@ -590,7 +636,9 @@ class AutomationsTab(QWidget):
             q = step.get("query", "")
             win = step.get("window_title", "")
             win_tag = f" [{win}]" if win else ""
-            return f"find text \u2192 {q[:30]}{win_tag}"
+            ox, oy = step.get("offset_x", 0), step.get("offset_y", 0)
+            offset = f" +({ox},{oy})" if ox or oy else ""
+            return f"find text \u2192 {q[:30]}{win_tag}{offset}"
         if action == "simple_click":
             btn = step.get("button", "left")
             n = step.get("clicks", 1)
@@ -638,10 +686,13 @@ class AutomationsTab(QWidget):
             self._editor_search_text["case_sensitive"].setChecked(
                 step.get("case_sensitive", False)
             )
+            self._editor_search_text["offset_x"].setValue(int(step.get("offset_x", 0)))
+            self._editor_search_text["offset_y"].setValue(int(step.get("offset_y", 0)))
             self._editor_search_text["timeout"].setValue(step.get("timeout", 10))
             self._editor_search_text["move_duration"].setValue(
                 float(step.get("move_duration", 0))
             )
+            self._editor_search_text["pick_status"].setText("Ready")
         elif action == "simple_click":
             _set_combo(
                 self._editor_simple_click["button"],
@@ -720,6 +771,8 @@ class AutomationsTab(QWidget):
                 step["window_title"] = wt
             step["match"] = self._editor_search_text["match"].currentText()
             step["case_sensitive"] = self._editor_search_text["case_sensitive"].isChecked()
+            step["offset_x"] = self._editor_search_text["offset_x"].value()
+            step["offset_y"] = self._editor_search_text["offset_y"].value()
             step["timeout"] = self._editor_search_text["timeout"].value()
             step["move_duration"] = self._editor_search_text["move_duration"].value()
         elif action == "simple_click":
@@ -748,37 +801,95 @@ class AutomationsTab(QWidget):
             return None
         return (int(point.x), int(point.y))
 
+    def _pick_status_widget(self) -> QLabel:
+        action = self.combo_action.currentData()
+        if action == "move_to_text":
+            return self._editor_search_text["pick_status"]
+        return self._editor_click["pick_status"]
+
+    def _set_pick_status_by_mode(self, mode: str | None, text: str) -> None:
+        """After offset pick ends, use this (active label was cleared in _stop)."""
+        if mode == "text":
+            self._editor_search_text["pick_status"].setText(text)
+        else:
+            self._editor_click["pick_status"].setText(text)
+
     def _set_pick_status(self, text: str) -> None:
-        self._editor_click["pick_status"].setText(text)
+        label = self._active_pick_status_label
+        if label is None:
+            label = self._editor_click["pick_status"]
+        label.setText(text)
 
     def _start_visual_offset_pick(self) -> None:
         if self._offset_pick_poll_timer is not None:
             self._set_pick_status("Offset pick already in progress.")
             return
         row = self.step_list.currentRow()
+        action = self.combo_action.currentData()
+        if action not in ("move_to_image", "move_to_text"):
+            self._pick_status_widget().setText(
+                "Visual picker is only for move_to_image or move_to_text."
+            )
+            return
+        self._active_pick_status_label = self._pick_status_widget()
         if row < 0:
             self._set_pick_status("Select a step first.")
-            return
-        if self.combo_action.currentData() != "move_to_image":
-            self._set_pick_status("Visual picker is only available for move_to_image.")
-            return
-        target_name = self._editor_click["target"].currentText().strip()
-        if not target_name:
-            self._set_pick_status("Choose a target image first.")
-            return
-        target_path = self.targets_dir / target_name
-        if not target_path.exists():
-            self._set_pick_status(f"Target not found: {target_name}")
+            self._active_pick_status_label = None
             return
 
-        confidence = float(self._editor_click["confidence"].value())
-        timeout = int(self._editor_click["timeout"].value())
-        detect_timeout_ms = (timeout if timeout > 0 else 10) * 1000
-        self._offset_pick_target_path = target_path
-        self._offset_pick_confidence = confidence
-        self._offset_pick_step_row = row
-        self._set_pick_status("Searching for image on screen...")
-        self._editor_click["pick_button"].setEnabled(False)
+        if action == "move_to_image":
+            self._offset_pick_mode = "image"
+            target_name = self._editor_click["target"].currentText().strip()
+            if not target_name:
+                self._set_pick_status("Choose a target image first.")
+                self._active_pick_status_label = None
+                self._offset_pick_mode = None
+                return
+            target_path = self.targets_dir / target_name
+            if not target_path.exists():
+                self._set_pick_status(f"Target not found: {target_name}")
+                self._active_pick_status_label = None
+                self._offset_pick_mode = None
+                return
+
+            confidence = float(self._editor_click["confidence"].value())
+            timeout = int(self._editor_click["timeout"].value())
+            detect_timeout_ms = (timeout if timeout > 0 else 10) * 1000
+            self._offset_pick_target_path = target_path
+            self._offset_pick_confidence = confidence
+            self._offset_pick_step_row = row
+            self._set_pick_status("Searching for image on screen...")
+            self._editor_click["pick_button"].setEnabled(False)
+        else:
+            self._offset_pick_mode = "text"
+            query = self._editor_search_text["query"].text().strip()
+            if not query:
+                self._set_pick_status("Enter a search query first.")
+                self._active_pick_status_label = None
+                self._offset_pick_mode = None
+                return
+            wt = self._editor_search_text["window_title"].currentText().strip()
+            if wt:
+                try:
+                    region = screen.get_window_region(wt)
+                except screen.TargetNotFoundError:
+                    self._set_pick_status(f"Window not found: {wt}")
+                    self._active_pick_status_label = None
+                    self._offset_pick_mode = None
+                    return
+            else:
+                region = None
+            self._offset_pick_text_query = query
+            self._offset_pick_text_region = region
+            self._offset_pick_text_match = self._editor_search_text["match"].currentText()
+            self._offset_pick_text_case = self._editor_search_text["case_sensitive"].isChecked()
+            timeout = int(self._editor_search_text["timeout"].value())
+            detect_timeout_ms = max(1, timeout) * 1000
+            self._offset_pick_target_path = None
+            self._offset_pick_step_row = row
+            self._set_pick_status("Searching for text on screen...")
+            self._editor_search_text["pick_button"].setEnabled(False)
+
         self._offset_pick_overlay = DetectionOverlay()
         self._offset_pick_poll_timer = QTimer(self)
         self._offset_pick_poll_timer.setInterval(500)
@@ -809,22 +920,53 @@ class AutomationsTab(QWidget):
             self._offset_pick_overlay = None
         self._offset_pick_target_path = None
         self._offset_pick_center = None
+        self._offset_pick_mode = None
+        self._active_pick_status_label = None
         self._editor_click["pick_button"].setEnabled(True)
+        self._editor_search_text["pick_button"].setEnabled(True)
 
     def _on_offset_pick_find_timeout(self) -> None:
-        self._set_pick_status("Image not found in time. Try lower confidence.")
+        if self._offset_pick_mode == "text":
+            self._set_pick_status("Text not found in time. Try another query or window.")
+        else:
+            self._set_pick_status("Image not found in time. Try lower confidence.")
         self._stop_visual_offset_pick()
 
     def _poll_visual_offset_find(self) -> None:
-        if self._offset_pick_target_path is None:
+        if self._offset_pick_mode == "image":
+            if self._offset_pick_target_path is None:
+                return
+            box = screen.find_image_box(
+                self._offset_pick_target_path, self._offset_pick_confidence
+            )
+            if self._offset_pick_overlay is not None:
+                self._offset_pick_overlay.update_box(box)
+            if box is None:
+                return
+            left, top, width, height = box
+            self._offset_pick_center = (left + width // 2, top + height // 2)
+        elif self._offset_pick_mode == "text":
+            q = self._offset_pick_text_query
+            if not q:
+                return
+            try:
+                box, center = screen.find_text_box_and_point_on_screen(
+                    q,
+                    region=self._offset_pick_text_region,
+                    match_mode=self._offset_pick_text_match,
+                    case_sensitive=self._offset_pick_text_case,
+                )
+            except screen.TesseractMissingError as e:
+                self._set_pick_status(str(e))
+                self._stop_visual_offset_pick()
+                return
+            if self._offset_pick_overlay is not None:
+                self._offset_pick_overlay.update_detection(box, center)
+            if center is None:
+                return
+            self._offset_pick_center = (center[0], center[1])
+        else:
             return
-        box = screen.find_image_box(self._offset_pick_target_path, self._offset_pick_confidence)
-        if self._offset_pick_overlay is not None:
-            self._offset_pick_overlay.update_box(box)
-        if box is None:
-            return
-        left, top, width, height = box
-        self._offset_pick_center = (left + width // 2, top + height // 2)
         if self._offset_pick_poll_timer is not None:
             self._offset_pick_poll_timer.stop()
         if self._offset_pick_deadline_timer is not None:
@@ -852,20 +994,22 @@ class AutomationsTab(QWidget):
         if not left_pressed:
             return
 
+        mode = self._offset_pick_mode
         pos = self._cursor_pos()
         center = self._offset_pick_center
         self._stop_visual_offset_pick()
         if pos is None or center is None:
-            self._set_pick_status("Could not read cursor position.")
+            self._set_pick_status_by_mode(mode, "Could not read cursor position.")
             return
 
         offset_x = int(pos[0] - center[0])
         offset_y = int(pos[1] - center[1])
+        center_label = "Match center" if mode == "text" else "Image center"
         confirm = QMessageBox.question(
             self,
             "Confirm Click Offset",
             "Save click offset for this step?\n\n"
-            f"Image center: ({center[0]}, {center[1]})\n"
+            f"{center_label}: ({center[0]}, {center[1]})\n"
             f"Clicked point: ({pos[0]}, {pos[1]})\n"
             f"Offset X: {offset_x}\n"
             f"Offset Y: {offset_y}",
@@ -873,16 +1017,20 @@ class AutomationsTab(QWidget):
             QMessageBox.StandardButton.Yes,
         )
         if confirm != QMessageBox.StandardButton.Yes:
-            self._set_pick_status("Offset pick cancelled.")
+            self._set_pick_status_by_mode(mode, "Offset pick cancelled.")
             return
 
         if self.step_list.currentRow() != self._offset_pick_step_row:
             self.step_list.setCurrentRow(self._offset_pick_step_row)
-        self._editor_click["offset_x"].setValue(offset_x)
-        self._editor_click["offset_y"].setValue(offset_y)
+        if mode == "text":
+            self._editor_search_text["offset_x"].setValue(offset_x)
+            self._editor_search_text["offset_y"].setValue(offset_y)
+        else:
+            self._editor_click["offset_x"].setValue(offset_x)
+            self._editor_click["offset_y"].setValue(offset_y)
         self._save_step()
         self.step_list.setCurrentRow(self._offset_pick_step_row)
-        self._set_pick_status(f"Saved offset ({offset_x}, {offset_y}).")
+        self._set_pick_status_by_mode(mode, f"Saved offset ({offset_x}, {offset_y}).")
 
     def _persist(self):
         if self._current_file:

@@ -3,11 +3,13 @@
   "steps": [
     {
       "action": "move_to_text",
-      "query": "inbox",
-      "window_title": "Inbox (23,623) - bobbybotbop@gmail.com - Gmail - Google Chrome",
+      "query": "new agent",
       "match": "contains",
       "case_sensitive": false,
-      "timeout": 10
+      "offset_x": -11,
+      "offset_y": -55,
+      "timeout": 10,
+      "move_duration": 0.0
     }
   ]
 }

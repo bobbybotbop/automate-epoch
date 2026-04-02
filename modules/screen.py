@@ -15,11 +15,168 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import logging
+import traceback
+
+import numpy as np
 import pyautogui
 import pygetwindow as gw
+import pyscreeze
+from PIL import Image
+
+_log = logging.getLogger("flowdesk.detection")
 
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.1
+
+
+def _patch_pyscreeze_screenshot_all_screens() -> None:
+    """Windows: default PyScreeze capture is primary monitor only; match full desktop."""
+    if sys.platform != "win32":
+        return
+    orig = pyscreeze.screenshot
+
+    def screenshot(*args, **kwargs):
+        if kwargs.get("region") is None:
+            kwargs.setdefault("allScreens", True)
+        return orig(*args, **kwargs)
+
+    pyscreeze.screenshot = screenshot
+
+
+_patch_pyscreeze_screenshot_all_screens()
+
+
+def _is_pyinstaller_bundle() -> bool:
+    """True when running under PyInstaller (onefile or onedir)."""
+    return bool(getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None))
+
+
+# Throttle foregrounding the same window during OCR/image polling (get_window_region).
+_WINDOW_ACTIVATE_COOLDOWN_SEC = 2.0
+_window_activate_last: dict[str, float] = {}
+
+
+def _full_screen_capture():
+    """Bitmap for full-screen OCR and image matching.
+
+    On Windows, prefer Pillow ``ImageGrab.grab(all_screens=True)`` so capture
+    covers the virtual desktop (all monitors) and matches frozen PyInstaller
+    builds more reliably than PyAutoGUI/PyScreeze defaults (``allScreens=False``).
+    """
+    if sys.platform == "win32":
+        try:
+            from PIL import ImageGrab
+
+            return ImageGrab.grab(all_screens=True)
+        except Exception:
+            pass
+        try:
+            return pyautogui.screenshot(allScreens=True)
+        except Exception:
+            pass
+    return pyautogui.screenshot()
+
+
+def _region_screenshot(region: tuple[int, int, int, int]):
+    """Screenshot of *(left, top, width, height)*, preferring Pillow on Windows."""
+    left, top, w, h = region
+    if sys.platform == "win32":
+        try:
+            from PIL import ImageGrab
+
+            bbox = (left, top, left + w, top + h)
+            return ImageGrab.grab(bbox=bbox, all_screens=True)
+        except Exception:
+            pass
+    return pyautogui.screenshot(region=region)
+
+
+def _needle_for_locate(path: Path) -> str | np.ndarray:
+    """Needle image the same way PyScreeze uses for ``locateOnScreen``: ``cv2.imread``
+    when possible; otherwise BGR ndarray via Pillow (Unicode / OneDrive paths).
+    """
+    import cv2
+
+    s = str(path)
+    if cv2.imread(s, cv2.IMREAD_COLOR) is not None:
+        return s
+    pil = Image.open(path).convert("RGB")
+    arr = np.array(pil)
+    return arr[:, :, ::-1].copy()
+
+
+# locateAll raises pyscreezes exception inside the generator; PyAutoGUIs wrapper
+# does not always convert that to ImageNotFoundException.
+_IMAGE_MATCH_EXCEPTIONS = (pyautogui.ImageNotFoundException, pyscreeze.ImageNotFoundException)
+
+
+def _confidence_tiers(base: float) -> list[float]:
+    """OpenCV match scores often fall well below 0.85 under DPI scaling or theme
+    changes. Retry with lower thresholds after color/grayscale attempts at *base*.
+    """
+    tiers: list[float] = [base]
+    if base > 0.5:
+        tiers.append(max(0.35, min(base * 0.55, 0.55)))
+    if base > 0.35:
+        tiers.append(0.28)
+    if base > 0.23:
+        tiers.append(0.22)
+    out: list[float] = []
+    seen: set[float] = set()
+    for t in tiers:
+        if t >= 0.2 and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _first_non_excluded_box(
+    needle: str | np.ndarray,
+    haystack,
+    *,
+    confidence: float,
+    grayscale: bool,
+) -> tuple[int, int, int, int] | None:
+    try:
+        for location in pyautogui.locateAll(
+            needle, haystack, confidence=confidence, grayscale=grayscale
+        ):
+            box = (
+                int(location.left),
+                int(location.top),
+                int(location.width),
+                int(location.height),
+            )
+            if not _is_excluded(box):
+                return box
+    except _IMAGE_MATCH_EXCEPTIONS:
+        pass
+    except Exception:
+        _log.warning("locateAll unexpected error:\n%s", traceback.format_exc())
+    return None
+
+
+def _find_template_box(path: Path, confidence: float) -> tuple[int, int, int, int] | None:
+    """First FlowDesk-excluding template hit across confidence tiers and grayscale."""
+    needle = _needle_for_locate(path)
+    needle_kind = "path" if isinstance(needle, str) else f"ndarray{needle.shape}"
+    haystack = _full_screen_capture()
+    _log.debug(
+        "template_find  path=%s  needle=%s  haystack=%sx%s  tiers=%s",
+        path, needle_kind, haystack.width, haystack.height,
+        _confidence_tiers(confidence),
+    )
+    for conf in _confidence_tiers(confidence):
+        for grayscale in (False, True):
+            box = _first_non_excluded_box(
+                needle, haystack, confidence=conf, grayscale=grayscale
+            )
+            if box is not None:
+                _log.debug("template_hit  conf=%.2f  gs=%s  box=%s", conf, grayscale, box)
+                return box
+    _log.debug("template_miss  path=%s", path.name)
+    return None
 
 
 class TargetNotFoundError(Exception):
@@ -36,28 +193,37 @@ class TargetNotFoundError(Exception):
 def find_image(
     target_path: str | Path, confidence: float = 0.85
 ) -> tuple[int, int] | None:
-    """Single non-blocking screen check. Returns (x, y) center or None."""
-    try:
-        location = pyautogui.locateOnScreen(str(target_path), confidence=confidence)
-    except pyautogui.ImageNotFoundException:
+    """Single non-blocking screen check. Returns (x, y) center or None.
+
+    Uses OpenCV template matching (PyScreeze) on ``_full_screen_capture()`` and
+    tiered confidence plus grayscale fallback when strict thresholds miss (common
+    with display scaling). Matches inside FlowDesk or toast UI are skipped.
+    """
+    path = Path(target_path)
+    if not path.is_file():
+        _log.warning("find_image: file missing  path=%s", path)
         return None
-    if location is None:
+    box = _find_template_box(path, confidence)
+    if box is None:
         return None
-    center = pyautogui.center(location)
-    return (int(center.x), int(center.y))
+    x = int(box[0] + box[2] / 2)
+    y = int(box[1] + box[3] / 2)
+    return (x, y)
 
 
 def find_image_box(
     target_path: str | Path, confidence: float = 0.85
 ) -> tuple[int, int, int, int] | None:
-    """Single non-blocking screen check. Returns (left, top, width, height) or None."""
-    try:
-        location = pyautogui.locateOnScreen(str(target_path), confidence=confidence)
-    except pyautogui.ImageNotFoundException:
+    """Single non-blocking screen check. Returns (left, top, width, height) or None.
+
+    Matches that overlap FlowDesk's own window or toast area are ignored.
+    See ``find_image``.
+    """
+    path = Path(target_path)
+    if not path.is_file():
+        _log.warning("find_image_box: file missing  path=%s", path)
         return None
-    if location is None:
-        return None
-    return (int(location.left), int(location.top), int(location.width), int(location.height))
+    return _find_template_box(path, confidence)
 
 
 def wait_for_image(
@@ -140,13 +306,111 @@ def move_to(x: int, y: int, duration: float = 0) -> None:
 
 
 def screenshot(region: tuple[int, int, int, int] | None = None):
-    """Take a screenshot, optionally of a specific region (x, y, w, h)."""
-    return pyautogui.screenshot(region=region)
+    """Take a screenshot, optionally of a specific region (x, y, w, h).
+
+    Full-screen uses the same capture path as OCR and image matching (see
+    ``_full_screen_capture`` / ``_region_screenshot`` on Windows).
+    """
+    if region is None:
+        return _full_screen_capture()
+    return _region_screenshot(region)
 
 
 def simple_click(button: str = "left", clicks: int = 1) -> None:
     """Click at the current cursor position without moving."""
     pyautogui.click(button=button, clicks=clicks)
+
+
+# ---------------------------------------------------------------------------
+# Self-exclusion: ignore matches inside FlowDesk windows and toast areas
+# ---------------------------------------------------------------------------
+
+_EXCLUSION_CACHE: tuple[float, list[tuple[int, int, int, int]]] = (0.0, [])
+_EXCLUSION_TTL = 0.5  # seconds
+
+_TOAST_W = 320
+_TOAST_H = 56
+_TOAST_MARGIN = 12
+_TOAST_MAX_SLOTS = 3
+
+
+def _rects_intersect(
+    a: tuple[int, int, int, int], b: tuple[int, int, int, int]
+) -> bool:
+    """True when rectangles (left, top, width, height) overlap."""
+    a_l, a_t, a_w, a_h = a
+    b_l, b_t, b_w, b_h = b
+    return (
+        a_l < b_l + b_w
+        and a_l + a_w > b_l
+        and a_t < b_t + b_h
+        and a_t + a_h > b_t
+    )
+
+
+def _point_in_any_rect(
+    x: float, y: float, rects: list[tuple[int, int, int, int]]
+) -> bool:
+    for l, t, w, h in rects:
+        if l <= x < l + w and t <= y < t + h:
+            return True
+    return False
+
+
+def _get_flowdesk_window_rects() -> list[tuple[int, int, int, int]]:
+    """Return screen rects for all visible FlowDesk windows."""
+    rects: list[tuple[int, int, int, int]] = []
+    try:
+        for w in gw.getAllWindows():
+            title = w.title or ""
+            if "FlowDesk" not in title or not title.strip():
+                continue
+            if w.isMinimized or w.width <= 0 or w.height <= 0:
+                continue
+            rects.append((max(w.left, 0), max(w.top, 0), w.width, w.height))
+    except Exception:
+        pass
+    return rects
+
+
+def _get_toast_rects() -> list[tuple[int, int, int, int]]:
+    """Return screen rects covering the bottom-right toast stack area."""
+    try:
+        from PyQt6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return []
+        geo = screen.availableGeometry()
+        right, bottom = geo.right(), geo.bottom()
+    except Exception:
+        sw, sh = pyautogui.size()
+        right, bottom = sw - 1, sh - 1
+
+    rects: list[tuple[int, int, int, int]] = []
+    for i in range(_TOAST_MAX_SLOTS):
+        x = right - _TOAST_W - _TOAST_MARGIN
+        y = bottom - (i + 1) * (_TOAST_H + _TOAST_MARGIN)
+        rects.append((x, y, _TOAST_W, _TOAST_H))
+    return rects
+
+
+def _get_exclusion_rects() -> list[tuple[int, int, int, int]]:
+    """Cached list of screen regions to ignore during matching."""
+    global _EXCLUSION_CACHE
+    now = time.monotonic()
+    if now - _EXCLUSION_CACHE[0] < _EXCLUSION_TTL:
+        return _EXCLUSION_CACHE[1]
+    rects = _get_flowdesk_window_rects() + _get_toast_rects()
+    _EXCLUSION_CACHE = (now, rects)
+    return rects
+
+
+def _is_excluded(bbox: tuple[int, int, int, int]) -> bool:
+    """True when *bbox* (left, top, w, h) overlaps any exclusion region."""
+    for er in _get_exclusion_rects():
+        if _rects_intersect(bbox, er):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +464,20 @@ def get_window_region(
         win.restore()
         time.sleep(0.4)
 
+    # Frozen EXE: foreground the target window so Pillow/GDI capture matches dev runs
+    # when another app was last focused (throttled to avoid fighting the user).
+    if _is_pyinstaller_bundle() and sys.platform == "win32":
+        now = time.monotonic()
+        last = _window_activate_last.get(title_substring, 0.0)
+        if now - last >= _WINDOW_ACTIVATE_COOLDOWN_SEC:
+            try:
+                if getattr(win, "isActive", True) is False:
+                    win.activate()
+                    time.sleep(0.12)
+            except Exception:
+                pass
+            _window_activate_last[title_substring] = now
+
     left, top = win.left, win.top
     w, h = win.width, win.height
     if w <= 0 or h <= 0:
@@ -225,17 +503,40 @@ def _configure_tesseract_cmd(pytesseract) -> None:
         return
 
     exe_path = Path(_resource_path("Tesseract-OCR/tesseract.exe"))
-    if not exe_path.is_file():
+    bundle_ok = exe_path.is_file()
+    traineddata_ok = bundle_ok and (exe_path.parent / "tessdata" / "eng.traineddata").is_file()
+
+    if bundle_ok and traineddata_ok:
+        pytesseract.pytesseract.tesseract_cmd = str(exe_path)
+        # Windows portable Tesseract (and pytesseract's invocation) expects
+        # TESSDATA_PREFIX to point at the tessdata *folder* itself — it loads
+        # PREFIX/eng.traineddata, not PREFIX/tessdata/eng.traineddata.
+        tessdata = exe_path.parent / "tessdata"
+        if tessdata.is_dir():
+            os.environ["TESSDATA_PREFIX"] = str(tessdata)
+        _log.info(
+            "Tesseract: bundled  cmd=%s  TESSDATA_PREFIX=%s",
+            exe_path, os.environ.get("TESSDATA_PREFIX"),
+        )
+        return
+
+    import shutil
+
+    system_tess = shutil.which("tesseract")
+    if system_tess:
+        pytesseract.pytesseract.tesseract_cmd = system_tess
+        _log.info("Tesseract: system PATH  cmd=%s", system_tess)
+        return
+
+    if not bundle_ok:
         raise TesseractMissingError(
             f"Bundled Tesseract-OCR not found.\n"
             f"Expected: {exe_path}"
         )
-
-    pytesseract.pytesseract.tesseract_cmd = str(exe_path)
-
-    tessdata = exe_path.parent / "tessdata"
-    if tessdata.is_dir():
-        os.environ["TESSDATA_PREFIX"] = str(tessdata)
+    raise TesseractMissingError(
+        f"Language data missing — OCR cannot run without it.\n"
+        f"Expected: {exe_path.parent / 'tessdata' / 'eng.traineddata'}"
+    )
 
 
 def _ensure_pytesseract():
@@ -251,20 +552,8 @@ def _ensure_pytesseract():
 
 
 def ocr_screenshot(region: tuple[int, int, int, int] | None = None):
-    """Image for OCR. *region=None* captures the full virtual desktop (all
-    monitors on Windows via Pillow when available), matching image-target
-    behavior. With *region*, crops via PyAutoGUI.
-    """
-    if region is not None:
-        return pyautogui.screenshot(region=region)
-    if sys.platform == "win32":
-        try:
-            from PIL import ImageGrab
-
-            return ImageGrab.grab(all_screens=True)
-        except Exception:
-            pass
-    return pyautogui.screenshot()
+    """Image for OCR. Same capture path as ``screenshot`` / ``find_image``."""
+    return screenshot(region)
 
 
 # ---------------------------------------------------------------------------
@@ -657,6 +946,11 @@ def locate_text_match(
     )
 
     rows = list(_iter_word_rows(data))
+    _log.debug(
+        "OCR  query=%r  img=%sx%s  region=%s  word_rows=%d  sample=%s",
+        word, img.width, img.height, source_region, len(rows),
+        [r["text"] for r in rows[:8]],
+    )
     if any(ch.isspace() for ch in word):
         chosen = _select_phrase_match(
             rows=rows,
@@ -688,6 +982,7 @@ def locate_text_match(
             )
 
     if chosen is None:
+        _log.debug("OCR  no match for %r  (%d rows)", word, len(rows))
         return None
 
     region_left = source_region[0] if source_region else 0
@@ -697,6 +992,13 @@ def locate_text_match(
     bbox_top = region_top + chosen["top"]
     bbox_width = chosen["width"]
     bbox_height = chosen["height"]
+
+    if _is_excluded((bbox_left, bbox_top, bbox_width, bbox_height)):
+        _log.debug(
+            "OCR  match excluded  text=%r  bbox=(%d,%d,%d,%d)",
+            chosen["text"], bbox_left, bbox_top, bbox_width, bbox_height,
+        )
+        return None
 
     if letter is None:
         x, y = _center_of_bbox(bbox_left, bbox_top, bbox_width, bbox_height)
@@ -854,6 +1156,8 @@ def search_text(
     case_sensitive: bool = False,
     timeout: float = 10.0,
     poll_interval: float = 0.8,
+    offset_x: int = 0,
+    offset_y: int = 0,
     move_duration: float = 0,
     on_search_begin: Callable[[], None] | None = None,
     on_found: Callable[[], None] | None = None,
@@ -861,7 +1165,10 @@ def search_text(
     """Poll-search for *query* via OCR, then move the mouse to the found text.
 
     If *window_title* is non-empty, OCR is limited to that window's region;
-    otherwise the full virtual desktop is scanned (all monitors when supported).
+    otherwise the same full-screen capture as image matching is used.
+
+    The cursor moves to the OCR match center, shifted by *offset_x* / *offset_y*
+    (same convention as :func:`click_image`).
 
     Between failed attempts, wait time starts at *poll_interval* and increases with
     each miss (capped), so a long *timeout* runs fewer full OCR passes than a
@@ -897,8 +1204,10 @@ def search_text(
         if coords is not None:
             if on_found:
                 on_found()
-            move_to(coords[0], coords[1], duration=move_duration)
-            return coords
+            dest_x = coords[0] + offset_x
+            dest_y = coords[1] + offset_y
+            move_to(dest_x, dest_y, duration=move_duration)
+            return (dest_x, dest_y)
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
