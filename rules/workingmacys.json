@@ -1,0 +1,10 @@
+[
+  {
+    "rule_name": "find_customer_name",
+    "anchor": "BILLING ADDRESS",
+    "direction": "below",
+    "offset": 1,
+    "word_count": 2,
+    "page": null
+  }
+]

@@ -124,10 +124,23 @@ class AutomationRunner(QThread):
                 screen.wait_for_image(target, confidence=conf, timeout=step.get("timeout", 30))
                 return "ok", f"found {Path(target).name}"
 
+            elif action == "search_by_text":
+                return self._execute_search_by_text(step, record)
+
+            elif action == "simple_click":
+                button = step.get("button", "left")
+                clicks = int(step.get("clicks", 1))
+                screen.simple_click(button=button, clicks=clicks)
+                return "ok", f"{button} click" + (f" x{clicks}" if clicks > 1 else "")
+
             else:
                 return "skip", f"unknown action '{action}'"
 
         except screen.TargetNotFoundError as e:
+            return "fail", str(e)
+        except screen.TextNotFoundError as e:
+            return "fail", str(e)
+        except screen.TesseractMissingError as e:
             return "fail", str(e)
         except Exception as e:
             return "fail", f"{type(e).__name__}: {e}"
@@ -175,6 +188,27 @@ class AutomationRunner(QThread):
             last_msg = f"clicked {Path(target).name}{suffix} x{len(values)}"
 
         return "ok", f"clicked {Path(target).name}{suffix} ({len(values)} time(s) for '{loop_name}')"
+
+    def _execute_search_by_text(self, step: dict, record: dict) -> tuple[str, str]:
+        """OCR-search for text on screen (full desktop by default) and move the mouse."""
+        query = self._inject_variables(step.get("query", ""), record)
+        if not query.strip():
+            return "skip", "search query is empty"
+
+        wt = (step.get("window_title") or "").strip()
+        window_title = wt if wt else None
+        match_mode = step.get("match", "contains")
+        case_sensitive = step.get("case_sensitive", False)
+        timeout = step.get("timeout", 10)
+
+        coords = screen.search_text(
+            query,
+            window_title=window_title,
+            match_mode=match_mode,
+            case_sensitive=case_sensitive,
+            timeout=timeout,
+        )
+        return "ok", f"moved to '{query[:30]}' at ({coords[0]},{coords[1]})"
 
     @staticmethod
     def _normalize_loop_variable_name(raw: str) -> str:

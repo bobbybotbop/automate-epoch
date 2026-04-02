@@ -5,14 +5,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QRect, Qt, QTimer
 from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -23,7 +27,7 @@ from PyQt6.QtWidgets import (
 import pyautogui
 
 from modules.capture import start_capture
-from modules.screen import find_image_box
+from modules import screen
 from ui.toast import ToastType, show_toast
 
 META_FILENAME = "meta.json"
@@ -47,6 +51,7 @@ class DetectionOverlay(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._box: tuple[int, int, int, int] | None = None
+        self._point: tuple[int, int] | None = None
 
         screen = QApplication.primaryScreen()
         self._ratio = screen.devicePixelRatio() if screen else 1.0
@@ -60,13 +65,27 @@ class DetectionOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
-        if screen:
+        screens = QApplication.screens()
+        if screens:
+            vr = QRect()
+            for s in screens:
+                vr = vr.united(s.geometry())
+            self.setGeometry(vr)
+        elif screen:
             self.setGeometry(screen.geometry())
-        self.showFullScreen()
+        self.show()
+
+    def update_detection(
+        self,
+        box: tuple[int, int, int, int] | None,
+        point: tuple[int, int] | None = None,
+    ) -> None:
+        self._box = box
+        self._point = point
+        self.update()
 
     def update_box(self, box: tuple[int, int, int, int] | None) -> None:
-        self._box = box
-        self.update()
+        self.update_detection(box, None)
 
     def paintEvent(self, event) -> None:
         if self._box is None:
@@ -90,6 +109,14 @@ class DetectionOverlay(QWidget):
         label_y = top - 10 if top > 30 else top + h + 20
         painter.drawText(left, label_y, "FOUND")
 
+        if self._point is not None:
+            px, py = self._point
+            px, py = int(px / r), int(py / r)
+            dot_r = 6
+            painter.setPen(QPen(QColor(255, 60, 60), 2))
+            painter.setBrush(QColor(255, 60, 60, 220))
+            painter.drawEllipse(px - dot_r, py - dot_r, dot_r * 2, dot_r * 2)
+
         painter.end()
 
     def teardown(self) -> None:
@@ -111,6 +138,7 @@ class TargetsTab(QWidget):
         self._last_cursor_pos: tuple[int, int] | None = None
         self._last_pixel: tuple[int, int, int] | None = None
         self._pixel_sample_pt: tuple[int, int] | None = None
+        self._test_mode: str = "image"  # image|text
 
         self._build_ui()
         self.refresh()
@@ -134,6 +162,41 @@ class TargetsTab(QWidget):
         header.addWidget(btn_refresh)
 
         root.addLayout(header)
+
+        text_group = QGroupBox("Test Text Search (OCR)")
+        tl = QVBoxLayout(text_group)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Text:"))
+        self._text_query = QLineEdit()
+        self._text_query.setPlaceholderText("Invoice, Customer, etc.")
+        row1.addWidget(self._text_query)
+
+        btn_test_text = QPushButton("Test Text")
+        btn_test_text.setObjectName("primary")
+        btn_test_text.clicked.connect(self._on_test_text_clicked)
+        row1.addWidget(btn_test_text)
+        tl.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Match:"))
+        self._text_match = QComboBox()
+        self._text_match.addItems(["contains", "exact"])
+        row2.addWidget(self._text_match)
+
+        self._text_case = QCheckBox("Case")
+        row2.addWidget(self._text_case)
+        row2.addStretch()
+        tl.addLayout(row2)
+
+        hint = QLabel(
+            "Searches the full screen (all monitors), like image target tests."
+        )
+        hint.setObjectName("subtext")
+        hint.setWordWrap(True)
+        tl.addWidget(hint)
+
+        root.addWidget(text_group)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -214,6 +277,7 @@ class TargetsTab(QWidget):
     def _test_target(self, path: Path, confidence: float) -> None:
         """Minimize the window, then live-poll the screen for the target."""
         self._stop_test()
+        self._test_mode = "image"
         self._test_path = path
         self._test_confidence = confidence
         self._test_name = path.stem
@@ -245,7 +309,11 @@ class TargetsTab(QWidget):
         self._poll_tick()
 
     def _poll_tick(self) -> None:
-        box = find_image_box(self._test_path, self._test_confidence)
+        if self._test_mode == "text":
+            self._poll_text_tick()
+            return
+
+        box = screen.find_image_box(self._test_path, self._test_confidence)
         if self._detection_overlay:
             self._detection_overlay.update_box(box)
         if self._test_toast:
@@ -258,6 +326,63 @@ class TargetsTab(QWidget):
             else:
                 self._test_toast.update_message(
                     f"Searching for {self._test_name}\u2026  (Esc to cancel)",
+                    ToastType.WARNING,
+                )
+
+    def _on_test_text_clicked(self) -> None:
+        query = self._text_query.text().strip()
+        if not query:
+            show_toast("Enter text to search for", ToastType.WARNING)
+            return
+        self._test_text(
+            query=query,
+            match_mode=self._text_match.currentText(),
+            case_sensitive=self._text_case.isChecked(),
+        )
+
+    def _test_text(
+        self,
+        query: str,
+        match_mode: str,
+        case_sensitive: bool,
+    ) -> None:
+        self._stop_test()
+        self._test_mode = "text"
+        self._text_test_query = query
+        self._text_test_match = match_mode
+        self._text_test_case = case_sensitive
+        self._test_name = query
+        if self.parent_window:
+            self.parent_window.showMinimized()
+        QTimer.singleShot(400, self._start_live_test)
+
+    def _poll_text_tick(self) -> None:
+        point = None
+        try:
+            box, point = screen.find_text_box_and_point_on_screen(
+                self._text_test_query,
+                region=None,
+                match_mode=self._text_test_match,
+                case_sensitive=self._text_test_case,
+            )
+        except Exception as exc:
+            box = None
+            if self._test_toast:
+                self._test_toast.update_message(str(exc), ToastType.ERROR)
+
+        if self._detection_overlay:
+            self._detection_overlay.update_detection(box, point)
+
+        if self._test_toast:
+            if box is not None:
+                self._test_toast.update_message(
+                    "Text detected  (Esc to close)",
+                    ToastType.SUCCESS,
+                )
+                self._freeze_test()
+            else:
+                self._test_toast.update_message(
+                    "Searching for text…  (Esc to cancel)",
                     ToastType.WARNING,
                 )
 
@@ -318,9 +443,21 @@ class TargetsTab(QWidget):
         if pixel_changed and px is not None:
             self._last_pixel = px
 
-        box = find_image_box(self._test_path, self._test_confidence)
+        point = None
+        if self._test_mode == "text":
+            try:
+                box, point = screen.find_text_box_and_point_on_screen(
+                    self._text_test_query,
+                    region=None,
+                    match_mode=self._text_test_match,
+                    case_sensitive=self._text_test_case,
+                )
+            except Exception:
+                box = None
+        else:
+            box = screen.find_image_box(self._test_path, self._test_confidence)
         if self._detection_overlay:
-            self._detection_overlay.update_box(box)
+            self._detection_overlay.update_detection(box, point)
 
         if box is not None:
             left, top, w, h = box
@@ -360,6 +497,7 @@ class TargetsTab(QWidget):
         self._last_cursor_pos = None
         self._last_pixel = None
         self._pixel_sample_pt = None
+        self._test_mode = "image"
         if self._poll_timer is not None:
             self._poll_timer.stop()
             self._poll_timer = None

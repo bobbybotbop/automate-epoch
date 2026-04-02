@@ -8,6 +8,7 @@ from pathlib import Path
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QShowEvent
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QHBoxLayout,
@@ -25,11 +26,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+import pygetwindow as gw
+
 ACTION_TYPES = [
     "click_image",
     "type_value",
     "hotkey",
     "wait_for_image",
+    "search_by_text",
+    "simple_click",
 ]
 
 ACTION_DESCRIPTIONS = {
@@ -37,6 +42,8 @@ ACTION_DESCRIPTIONS = {
     "type_value": "Type text into focused field",
     "hotkey": "Send keyboard shortcut",
     "wait_for_image": "Wait for screen target to appear",
+    "search_by_text": "OCR-find text on screen & move mouse",
+    "simple_click": "Click at current cursor position",
 }
 
 
@@ -197,11 +204,15 @@ class AutomationsTab(QWidget):
         self._editor_type = self._make_type_editor()
         self._editor_hotkey = self._make_hotkey_editor()
         self._editor_wait = self._make_wait_editor()
+        self._editor_search_text = self._make_search_text_editor()
+        self._editor_simple_click = self._make_simple_click_editor()
 
-        self.editor_stack.addWidget(self._editor_click["widget"])   # 0: click_image
-        self.editor_stack.addWidget(self._editor_type["widget"])    # 1: type_value
-        self.editor_stack.addWidget(self._editor_hotkey["widget"])  # 2: hotkey
-        self.editor_stack.addWidget(self._editor_wait["widget"])    # 3: wait_for_image
+        self.editor_stack.addWidget(self._editor_click["widget"])        # 0: click_image
+        self.editor_stack.addWidget(self._editor_type["widget"])         # 1: type_value
+        self.editor_stack.addWidget(self._editor_hotkey["widget"])       # 2: hotkey
+        self.editor_stack.addWidget(self._editor_wait["widget"])         # 3: wait_for_image
+        self.editor_stack.addWidget(self._editor_search_text["widget"])  # 4: search_by_text
+        self.editor_stack.addWidget(self._editor_simple_click["widget"]) # 5: simple_click
 
     def _make_click_editor(self) -> dict:
         """Editor for click_image with target, confidence, offset, and loop variable."""
@@ -321,6 +332,110 @@ class AutomationsTab(QWidget):
         layout.addStretch()
         return {"widget": w, "keys": edit}
 
+    def _make_search_text_editor(self) -> dict:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(0, 8, 0, 0)
+
+        layout.addWidget(QLabel("Search Query (use {{variable}} for placeholders)"))
+        edit = QLineEdit()
+        edit.setPlaceholderText("{{customer_name}}")
+        layout.addWidget(edit)
+
+        layout.addWidget(QLabel("Insert variable"))
+        var_combo = QComboBox()
+        var_combo.setToolTip(
+            "Choose a Parser rule name to insert {{rule_name}} at the text cursor."
+        )
+
+        def on_var_activated(index: int) -> None:
+            if index <= 0:
+                return
+            name = var_combo.itemText(index)
+            pos = edit.cursorPosition()
+            token = f"{{{{{name}}}}}"
+            edit.insert(token)
+            edit.setCursorPosition(pos + len(token))
+            var_combo.setCurrentIndex(0)
+
+        var_combo.activated.connect(on_var_activated)
+        layout.addWidget(var_combo)
+
+        layout.addWidget(QLabel("Target window (optional)"))
+        win_combo = QComboBox()
+        win_combo.setEditable(True)
+        win_combo.setToolTip(
+            "Leave empty to search the full screen (all monitors). "
+            "If set, OCR is limited to that window."
+        )
+        layout.addWidget(win_combo)
+
+        btn_refresh_wins = QPushButton("Refresh Windows")
+        btn_refresh_wins.clicked.connect(lambda: self._populate_window_combo(win_combo))
+        layout.addWidget(btn_refresh_wins)
+
+        layout.addWidget(QLabel("Match Mode"))
+        match_combo = QComboBox()
+        match_combo.addItems(["contains", "exact"])
+        layout.addWidget(match_combo)
+
+        case_cb = QCheckBox("Case sensitive")
+        layout.addWidget(case_cb)
+
+        layout.addWidget(QLabel("Timeout (seconds)"))
+        spin_timeout = QSpinBox()
+        spin_timeout.setRange(1, 120)
+        spin_timeout.setValue(10)
+        layout.addWidget(spin_timeout)
+
+        layout.addStretch()
+        return {
+            "widget": w,
+            "query": edit,
+            "variable_combo": var_combo,
+            "window_title": win_combo,
+            "match": match_combo,
+            "case_sensitive": case_cb,
+            "timeout": spin_timeout,
+        }
+
+    def _make_simple_click_editor(self) -> dict:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(0, 8, 0, 0)
+
+        layout.addWidget(QLabel("Mouse Button"))
+        btn_combo = QComboBox()
+        btn_combo.addItems(["left", "right"])
+        layout.addWidget(btn_combo)
+
+        layout.addWidget(QLabel("Click Count"))
+        spin_clicks = QSpinBox()
+        spin_clicks.setRange(1, 3)
+        spin_clicks.setValue(1)
+        layout.addWidget(spin_clicks)
+
+        layout.addStretch()
+        return {
+            "widget": w,
+            "button": btn_combo,
+            "clicks": spin_clicks,
+        }
+
+    @staticmethod
+    def _populate_window_combo(combo: QComboBox) -> None:
+        prev = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("")
+        for t in sorted({t for t in gw.getAllTitles() if t.strip()}):
+            combo.addItem(t)
+        combo.blockSignals(False)
+        if not prev.strip():
+            combo.setCurrentIndex(0)
+        else:
+            _set_combo(combo, prev)
+
     def _refresh_targets(self):
         for ed in (self._editor_click, self._editor_wait):
             combo = ed["target"]
@@ -333,6 +448,7 @@ class AutomationsTab(QWidget):
         for combo in (
             self._editor_click["loop_variable"],
             self._editor_type["variable_combo"],
+            self._editor_search_text["variable_combo"],
         ):
             prev = combo.currentText()
             combo.blockSignals(True)
@@ -347,6 +463,7 @@ class AutomationsTab(QWidget):
         super().showEvent(event)
         self._refresh_targets()
         self._refresh_rule_variables()
+        self._populate_window_combo(self._editor_search_text["window_title"])
         row = self.step_list.currentRow()
         steps = self._automation.get("steps", [])
         if 0 <= row < len(steps):
@@ -448,6 +565,15 @@ class AutomationsTab(QWidget):
             return f"type \u2192 {val[:30]}"
         if action == "hotkey":
             return f"hotkey \u2192 {'+'.join(step.get('keys', []))}"
+        if action == "search_by_text":
+            q = step.get("query", "")
+            win = step.get("window_title", "")
+            win_tag = f" [{win}]" if win else ""
+            return f"find text \u2192 {q[:30]}{win_tag}"
+        if action == "simple_click":
+            btn = step.get("button", "left")
+            n = step.get("clicks", 1)
+            return f"click \u2192 {btn}" + (f" x{n}" if n > 1 else "")
         return action
 
     def _on_step_selected(self, row: int):
@@ -482,6 +608,26 @@ class AutomationsTab(QWidget):
             self._editor_type["value"].setText(step.get("value", ""))
         elif action == "hotkey":
             self._editor_hotkey["keys"].setText(",".join(step.get("keys", [])))
+        elif action == "search_by_text":
+            self._editor_search_text["query"].setText(step.get("query", ""))
+            _set_combo(
+                self._editor_search_text["window_title"],
+                step.get("window_title", ""),
+            )
+            _set_combo(
+                self._editor_search_text["match"],
+                step.get("match", "contains"),
+            )
+            self._editor_search_text["case_sensitive"].setChecked(
+                step.get("case_sensitive", False)
+            )
+            self._editor_search_text["timeout"].setValue(step.get("timeout", 10))
+        elif action == "simple_click":
+            _set_combo(
+                self._editor_simple_click["button"],
+                step.get("button", "left"),
+            )
+            self._editor_simple_click["clicks"].setValue(step.get("clicks", 1))
 
     def _on_action_type_changed(self, idx: int):
         self.editor_stack.setCurrentIndex(idx)
@@ -553,6 +699,17 @@ class AutomationsTab(QWidget):
         elif action == "hotkey":
             keys_text = self._editor_hotkey["keys"].text()
             step["keys"] = [k.strip() for k in keys_text.split(",") if k.strip()]
+        elif action == "search_by_text":
+            step["query"] = self._editor_search_text["query"].text()
+            wt = self._editor_search_text["window_title"].currentText().strip()
+            if wt:
+                step["window_title"] = wt
+            step["match"] = self._editor_search_text["match"].currentText()
+            step["case_sensitive"] = self._editor_search_text["case_sensitive"].isChecked()
+            step["timeout"] = self._editor_search_text["timeout"].value()
+        elif action == "simple_click":
+            step["button"] = self._editor_simple_click["button"].currentText()
+            step["clicks"] = self._editor_simple_click["clicks"].value()
 
         steps[row] = step
         self._refresh_step_list()

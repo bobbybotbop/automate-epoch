@@ -5,7 +5,9 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ('Tesseract-OCR', 'Tesseract-OCR'),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

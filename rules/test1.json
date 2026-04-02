@@ -1,9 +1,0 @@
-[
-  {
-    "rule_name": "customer_names",
-    "anchor": "Ship to",
-    "direction": "below",
-    "offset": 1,
-    "page": null
-  }
-]

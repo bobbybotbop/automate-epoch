@@ -1,0 +1,13 @@
+{
+  "name": "texttest",
+  "steps": [
+    {
+      "action": "search_by_text",
+      "query": "inbox",
+      "window_title": "Inbox (23,623) - bobbybotbop@gmail.com - Gmail - Google Chrome",
+      "match": "contains",
+      "case_sensitive": false,
+      "timeout": 10
+    }
+  ]
+}
