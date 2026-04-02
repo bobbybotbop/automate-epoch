@@ -8,6 +8,7 @@ import os
 import sys
 import zipfile
 from pathlib import Path
+from typing import Callable
 
 from PyQt6.QtCore import QProcess
 from PyQt6.QtWidgets import (
@@ -22,15 +23,38 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from modules.app_paths import application_base_dir
 from ui.toast import ToastType, show_toast
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = application_base_dir()
+
+META_FILENAME = "meta.json"
+
+
+def _is_valid_automation(data) -> bool:
+    return isinstance(data, dict) and "steps" in data
+
+
+def _is_valid_ruleset(data) -> bool:
+    if isinstance(data, list):
+        return True
+    return isinstance(data, dict) and isinstance(data.get("rules"), list)
 
 
 class ImportExportTab(QWidget):
-    def __init__(self, automations_dir: Path):
+    def __init__(
+        self,
+        automations_dir: Path,
+        rules_dir: Path,
+        targets_dir: Path,
+        *,
+        on_import: Callable[[], None] | None = None,
+    ):
         super().__init__()
         self.automations_dir = automations_dir
+        self.rules_dir = rules_dir
+        self.targets_dir = targets_dir
+        self._on_import = on_import
         self._build_process: QProcess | None = None
         self._pip_process: QProcess | None = None
         self._build_ui()
@@ -84,17 +108,18 @@ class ImportExportTab(QWidget):
         root.addWidget(exe_group)
 
         # --- Export section ---
-        export_group = QGroupBox("Export Automations")
+        export_group = QGroupBox("Export Config")
         export_layout = QVBoxLayout(export_group)
 
         export_desc = QLabel(
-            "Save all automation configs (automations/*.json) as a .zip archive."
+            "Save automations, parser rule sets, and screen targets "
+            "as a single .zip archive."
         )
         export_desc.setWordWrap(True)
         export_desc.setObjectName("subtext")
         export_layout.addWidget(export_desc)
 
-        btn_export = QPushButton("Export automations config")
+        btn_export = QPushButton("Export config")
         btn_export.setObjectName("primary")
         btn_export.clicked.connect(self._export_automations)
         export_layout.addWidget(btn_export)
@@ -102,18 +127,19 @@ class ImportExportTab(QWidget):
         root.addWidget(export_group)
 
         # --- Import section ---
-        import_group = QGroupBox("Import Automations")
+        import_group = QGroupBox("Import Config")
         import_layout = QVBoxLayout(import_group)
 
         import_desc = QLabel(
-            "Load automation configs from a .zip archive exported by FlowDesk. "
+            "Load automations, rule sets, and targets from a .zip archive "
+            "exported by FlowDesk. "
             "Conflicting names are auto-renamed to keep both versions."
         )
         import_desc.setWordWrap(True)
         import_desc.setObjectName("subtext")
         import_layout.addWidget(import_desc)
 
-        btn_import = QPushButton("Import automations config")
+        btn_import = QPushButton("Import config")
         btn_import.setObjectName("primary")
         btn_import.clicked.connect(self._import_automations)
         import_layout.addWidget(btn_import)
@@ -148,10 +174,18 @@ class ImportExportTab(QWidget):
             return
 
         python = sys.executable
+        # Bundle Tesseract-OCR next to code in _MEIPASS (see modules/screen.py).
+        if sys.platform == "win32":
+            data_sep = ";"
+        else:
+            data_sep = ":"
         args = [
             "-m", "PyInstaller",
             "--noconfirm", "--clean",
             "--onefile", "--windowed",
+            "--noupx",
+            "--hidden-import", "pytesseract",
+            "--add-data", f"Tesseract-OCR{data_sep}Tesseract-OCR",
             "--name", "FlowDesk",
             "main.py",
         ]
@@ -241,39 +275,55 @@ class ImportExportTab(QWidget):
         os.startfile(str(dist))
 
     # ------------------------------------------------------------------
-    # Export automations
+    # Export
     # ------------------------------------------------------------------
 
     def _export_automations(self):
-        json_files = sorted(self.automations_dir.glob("*.json"))
-        if not json_files:
-            show_toast("No automations to export", ToastType.WARNING)
+        auto_files = sorted(self.automations_dir.glob("*.json"))
+        rule_files = sorted(self.rules_dir.glob("*.json"))
+        target_files = sorted(self.targets_dir.glob("*.png"))
+        meta_path = self.targets_dir / META_FILENAME
+
+        if not auto_files and not rule_files and not target_files:
+            show_toast("Nothing to export", ToastType.WARNING)
             return
 
-        default_name = "flowdesk_automations.zip"
+        default_name = "flowdesk_config.zip"
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Automations", default_name, "Zip Archives (*.zip)"
+            self, "Export Config", default_name, "Zip Archives (*.zip)"
         )
         if not path:
             return
 
         try:
             with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for f in json_files:
-                    zf.write(f, f.name)
-            show_toast(
-                f"Exported {len(json_files)} automation(s)", ToastType.SUCCESS
-            )
+                for f in auto_files:
+                    zf.write(f, f"automations/{f.name}")
+                for f in rule_files:
+                    zf.write(f, f"rules/{f.name}")
+                for f in target_files:
+                    zf.write(f, f"targets/{f.name}")
+                if meta_path.is_file():
+                    zf.write(meta_path, f"targets/{META_FILENAME}")
+
+            parts: list[str] = []
+            if auto_files:
+                parts.append(f"{len(auto_files)} automation(s)")
+            if rule_files:
+                parts.append(f"{len(rule_files)} rule set(s)")
+            if target_files:
+                parts.append(f"{len(target_files)} target(s)")
+            show_toast(f"Exported {', '.join(parts)}", ToastType.SUCCESS)
         except Exception as exc:
             show_toast(f"Export failed: {exc}", ToastType.ERROR)
 
     # ------------------------------------------------------------------
-    # Import automations
+    # Import
     # ------------------------------------------------------------------
 
     def _import_automations(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import Automations", "", "Zip Archives (*.zip)"
+            self, "Import Config", "", "Zip Archives (*.zip)"
         )
         if not path:
             return
@@ -281,57 +331,132 @@ class ImportExportTab(QWidget):
         try:
             with zipfile.ZipFile(path, "r") as zf:
                 names = zf.namelist()
-
-            valid: list[str] = []
-            for name in names:
-                basename = Path(name).name
-                if basename != name:
-                    continue
-                if not name.lower().endswith(".json"):
-                    continue
-                valid.append(name)
-
-            if not valid:
-                show_toast("Zip contains no valid automation JSON files", ToastType.WARNING)
-                return
-
-            imported = 0
-            renamed = 0
-
-            with zipfile.ZipFile(path, "r") as zf:
-                for name in valid:
-                    raw = zf.read(name)
-                    try:
-                        data = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(data, dict) or "steps" not in data:
-                        continue
-
-                    dest = self.automations_dir / name
-                    if dest.exists():
-                        dest = self._unique_path(dest)
-                        renamed += 1
-
-                    dest.write_bytes(raw)
-                    imported += 1
-
-            if imported:
-                summary = f"Imported {imported} automation(s)"
-                if renamed:
-                    summary += f" ({renamed} renamed to avoid conflicts)"
-                show_toast(summary, ToastType.SUCCESS)
-            else:
-                show_toast("No valid automations found in zip", ToastType.WARNING)
-
+                counts = self._do_import(zf, names)
         except zipfile.BadZipFile:
             show_toast("Selected file is not a valid zip archive", ToastType.ERROR)
+            return
         except Exception as exc:
             show_toast(f"Import failed: {exc}", ToastType.ERROR)
+            return
+
+        n_auto, n_rules, n_targets, n_renamed = counts
+        total = n_auto + n_rules + n_targets
+
+        if total == 0:
+            show_toast("No valid items found in zip", ToastType.WARNING)
+            return
+
+        parts: list[str] = []
+        if n_auto:
+            parts.append(f"{n_auto} automation(s)")
+        if n_rules:
+            parts.append(f"{n_rules} rule set(s)")
+        if n_targets:
+            parts.append(f"{n_targets} target(s)")
+        summary = f"Imported {', '.join(parts)}"
+        if n_renamed:
+            summary += f" ({n_renamed} renamed to avoid conflicts)"
+        show_toast(summary, ToastType.SUCCESS)
+
+        if self._on_import:
+            self._on_import()
+
+    def _do_import(
+        self, zf: zipfile.ZipFile, names: list[str]
+    ) -> tuple[int, int, int, int]:
+        n_auto = 0
+        n_rules = 0
+        n_targets = 0
+        n_renamed = 0
+        imported_meta: dict | None = None
+
+        for name in names:
+            parts = Path(name).parts
+
+            if len(parts) == 2 and parts[0] == "automations" and name.lower().endswith(".json"):
+                raw = zf.read(name)
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not _is_valid_automation(data):
+                    continue
+                dest, was_renamed = self._safe_dest(self.automations_dir, parts[1])
+                n_renamed += was_renamed
+                dest.write_bytes(raw)
+                n_auto += 1
+
+            elif len(parts) == 2 and parts[0] == "rules" and name.lower().endswith(".json"):
+                raw = zf.read(name)
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not _is_valid_ruleset(data):
+                    continue
+                dest, was_renamed = self._safe_dest(self.rules_dir, parts[1])
+                n_renamed += was_renamed
+                dest.write_bytes(raw)
+                n_rules += 1
+
+            elif len(parts) == 2 and parts[0] == "targets" and parts[1].lower() == META_FILENAME.lower():
+                raw = zf.read(name)
+                try:
+                    imported_meta = json.loads(raw)
+                except json.JSONDecodeError:
+                    pass
+
+            elif len(parts) == 2 and parts[0] == "targets" and name.lower().endswith(".png"):
+                raw = zf.read(name)
+                dest, was_renamed = self._safe_dest(self.targets_dir, parts[1])
+                n_renamed += was_renamed
+                dest.write_bytes(raw)
+                n_targets += 1
+
+            elif len(parts) == 1 and name.lower().endswith(".json"):
+                # Legacy: root-level automation JSON from older exports
+                raw = zf.read(name)
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not _is_valid_automation(data):
+                    continue
+                dest, was_renamed = self._safe_dest(self.automations_dir, parts[0])
+                n_renamed += was_renamed
+                dest.write_bytes(raw)
+                n_auto += 1
+
+        if imported_meta and isinstance(imported_meta, dict):
+            self._merge_target_meta(imported_meta)
+
+        return n_auto, n_rules, n_targets, n_renamed
+
+    def _merge_target_meta(self, incoming: dict) -> None:
+        meta_path = self.targets_dir / META_FILENAME
+        existing: dict = {}
+        if meta_path.is_file():
+            try:
+                existing = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+        existing.update(incoming)
+        meta_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+
+    def _safe_dest(self, base_dir: Path, filename: str) -> tuple[Path, int]:
+        """Return (dest_path, 1_if_renamed) after zip-slip validation."""
+        dest = (base_dir / filename).resolve()
+        if not str(dest).startswith(str(base_dir.resolve())):
+            raise ValueError(f"Zip entry escapes target directory: {filename}")
+        renamed = 0
+        if dest.exists():
+            dest = self._unique_path(dest)
+            renamed = 1
+        return dest, renamed
 
     @staticmethod
     def _unique_path(path: Path) -> Path:
-        """Return a path like name_imported_1.json that doesn't exist yet."""
+        """Return a path like name_imported_1.ext that doesn't exist yet."""
         stem = path.stem
         suffix = path.suffix
         parent = path.parent

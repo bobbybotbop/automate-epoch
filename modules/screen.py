@@ -10,7 +10,7 @@ import os
 import re
 import sys
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -65,17 +65,23 @@ def wait_for_image(
     confidence: float = 0.85,
     timeout: float = 0,
     poll_interval: float = 0.5,
+    on_search_begin: Callable[[], None] | None = None,
+    on_found: Callable[[], None] | None = None,
 ) -> tuple[int, int]:
     """Poll the screen until the target image appears. Returns (x, y) center.
 
     *timeout* in seconds.  ``0`` (default) means wait indefinitely.
     Raises TargetNotFoundError if a finite timeout elapses without a match.
     """
+    if on_search_begin:
+        on_search_begin()
     infinite = timeout <= 0
     deadline = None if infinite else time.monotonic() + timeout
     while True:
         coords = find_image(target_path, confidence)
         if coords is not None:
+            if on_found:
+                on_found()
             return coords
         if not infinite and time.monotonic() >= deadline:
             raise TargetNotFoundError(str(target_path), timeout)
@@ -89,6 +95,8 @@ def click_image(
     offset_x: int = 0,
     offset_y: int = 0,
     move_duration: float = 0,
+    on_search_begin: Callable[[], None] | None = None,
+    on_found: Callable[[], None] | None = None,
 ) -> tuple[int, int]:
     """Wait for a target image then move the mouse to it (no click).
 
@@ -99,7 +107,10 @@ def click_image(
     Returns the (x, y) coordinates the mouse was moved to.
     Raises TargetNotFoundError if a finite timeout elapses without a match.
     """
-    coords = wait_for_image(target_path, confidence, timeout)
+    coords = wait_for_image(
+        target_path, confidence, timeout,
+        on_search_begin=on_search_begin, on_found=on_found,
+    )
     dest_x = coords[0] + offset_x
     dest_y = coords[1] + offset_y
     move_to(dest_x, dest_y, duration=move_duration)
@@ -830,6 +841,12 @@ def find_text_box_and_point_on_screen(
     return ((int(left), int(top), int(w), int(h)), (int(round(px)), int(round(py))))
 
 
+# After each failed OCR, sleep grows (capped) so long timeouts spend fewer full
+# passes than a fixed delay every time, while the first wait matches *poll_interval*.
+_SEARCH_TEXT_BACKOFF_FACTOR = 1.5
+_SEARCH_TEXT_MAX_SLEEP_CAP = 3.0
+
+
 def search_text(
     query: str,
     window_title: str | None = None,
@@ -838,11 +855,19 @@ def search_text(
     timeout: float = 10.0,
     poll_interval: float = 0.8,
     move_duration: float = 0,
+    on_search_begin: Callable[[], None] | None = None,
+    on_found: Callable[[], None] | None = None,
 ) -> tuple[int, int]:
     """Poll-search for *query* via OCR, then move the mouse to the found text.
 
     If *window_title* is non-empty, OCR is limited to that window's region;
     otherwise the full virtual desktop is scanned (all monitors when supported).
+
+    Between failed attempts, wait time starts at *poll_interval* and increases with
+    each miss (capped), so a long *timeout* runs fewer full OCR passes than a
+    fixed *poll_interval* on every retry.
+
+    If *poll_interval* is <= 0, retries use ``time.sleep(0)`` only (same as before).
 
     Returns the (x, y) screen coordinates the mouse was moved to.
     Raises ``TextNotFoundError`` if not found within *timeout*.
@@ -852,14 +877,39 @@ def search_text(
     if wt:
         region = get_window_region(wt)
 
+    if on_search_begin:
+        on_search_begin()
+
     deadline = time.monotonic() + timeout
+    if poll_interval <= 0:
+        next_sleep = 0.0
+    else:
+        next_sleep = poll_interval
+        max_sleep_between = min(
+            _SEARCH_TEXT_MAX_SLEEP_CAP,
+            max(poll_interval * 3.0, poll_interval),
+        )
+
     while time.monotonic() < deadline:
         coords = find_text_on_screen(
             query, region=region, match_mode=match_mode, case_sensitive=case_sensitive
         )
         if coords is not None:
+            if on_found:
+                on_found()
             move_to(coords[0], coords[1], duration=move_duration)
             return coords
-        time.sleep(poll_interval)
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if poll_interval <= 0:
+            time.sleep(0)
+        else:
+            time.sleep(min(next_sleep, remaining))
+            next_sleep = min(
+                next_sleep * _SEARCH_TEXT_BACKOFF_FACTOR,
+                max_sleep_between,
+            )
 
     raise TextNotFoundError(query, timeout)

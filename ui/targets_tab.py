@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ctypes import wintypes
 from PyQt6.QtCore import QObject, QRect, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap, QShowEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -315,6 +315,10 @@ class TargetsTab(QWidget):
         self._grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         scroll.setWidget(self._grid_container)
         root.addWidget(scroll)
+
+    def showEvent(self, event: QShowEvent):
+        super().showEvent(event)
+        self.refresh()
 
     def refresh(self):
         while self._grid.count():

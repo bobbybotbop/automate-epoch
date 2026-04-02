@@ -481,6 +481,7 @@ class AutomationsTab(QWidget):
 
     def showEvent(self, event: QShowEvent):
         super().showEvent(event)
+        self._refresh_file_list()
         self._refresh_targets()
         self._refresh_rule_variables()
         self._populate_window_combo(self._editor_search_text["window_title"])
@@ -492,9 +493,15 @@ class AutomationsTab(QWidget):
     # --- Automation file management ---
 
     def _refresh_file_list(self):
+        prev = self.file_list.currentItem()
+        prev_name = prev.text() if prev else None
         self.file_list.clear()
         for f in sorted(self.automations_dir.glob("*.json")):
             self.file_list.addItem(f.stem)
+        if prev_name:
+            items = self.file_list.findItems(prev_name, Qt.MatchFlag.MatchExactly)
+            if items:
+                self.file_list.setCurrentItem(items[0])
 
     def _on_file_selected(self, current: QListWidgetItem | None, _prev):
         if current is None:

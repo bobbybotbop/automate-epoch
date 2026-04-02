@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
 
 from modules.parser import load_rules_bundle, parse_pdf
 from modules.runner import AutomationRunner, load_automation, load_confidence_meta
+from ui.toast import ToastType, show_toast
 
 
 def _automation_uses_variables(automation: dict) -> bool:
@@ -51,6 +52,7 @@ class RunnerTab(QWidget):
 
         self._pdf_path: str | None = None
         self._runner: AutomationRunner | None = None
+        self._run_toast = None
         self.status_changed: callable = None  # set by main window for tray updates
 
         self._build_ui()
@@ -258,6 +260,7 @@ class RunnerTab(QWidget):
 
         self._runner = AutomationRunner(automation, parsed, self.targets_dir, delay, meta)
         self._runner.log_message.connect(self._append_log)
+        self._runner.step_progress.connect(self._on_step_progress)
         self._runner.run_finished.connect(self._on_run_finished)
         self._runner.finished.connect(self._on_thread_done)
 
@@ -286,7 +289,33 @@ class RunnerTab(QWidget):
         self._append_log(f"=== DONE: {ok} ok, {fail} failed ===")
         self._save_log()
 
+    def _on_step_progress(self, phase: str, message: str):
+        if phase == "search":
+            if self._run_toast is not None:
+                self._run_toast.dismiss()
+            self._run_toast = show_toast(message, ToastType.INFO, persistent=True)
+        elif phase == "found":
+            if self._run_toast is not None:
+                self._run_toast.update_message(message, ToastType.SUCCESS)
+        elif phase == "done":
+            if self._run_toast is not None:
+                self._run_toast.update_message(message, ToastType.SUCCESS)
+                toast = self._run_toast
+                self._run_toast = None
+                QTimer.singleShot(1500, toast.dismiss)
+        elif phase == "error":
+            if self._run_toast is not None:
+                self._run_toast.update_message(message, ToastType.ERROR)
+                toast = self._run_toast
+                self._run_toast = None
+                QTimer.singleShot(3000, toast.dismiss)
+            else:
+                show_toast(message, ToastType.ERROR, duration_ms=3000)
+
     def _on_thread_done(self):
+        if self._run_toast is not None:
+            self._run_toast.dismiss()
+            self._run_toast = None
         self.btn_run.setEnabled(True)
         self.btn_pause.setEnabled(False)
         self.btn_pause.setText("Pause")

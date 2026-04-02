@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QShowEvent
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -229,10 +230,20 @@ class ParserTab(QWidget):
 
     # --- File management ---
 
+    def showEvent(self, event: QShowEvent):
+        super().showEvent(event)
+        self._refresh_file_list()
+
     def _refresh_file_list(self):
+        prev = self.file_list.currentItem()
+        prev_name = prev.text() if prev else None
         self.file_list.clear()
         for f in sorted(RULES_DIR.glob("*.json")):
             self.file_list.addItem(f.stem)
+        if prev_name:
+            items = self.file_list.findItems(prev_name, Qt.MatchFlag.MatchExactly)
+            if items:
+                self.file_list.setCurrentItem(items[0])
 
     def _on_file_selected(self, current: QListWidgetItem | None, _prev):
         if current is None:

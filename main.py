@@ -66,13 +66,14 @@ from PyQt6.QtWidgets import (
     QTabWidget,
 )
 
+from modules.app_paths import application_base_dir
 from ui.automations_tab import AutomationsTab
 from ui.import_export_tab import ImportExportTab
 from ui.parser_tab import ParserTab
 from ui.runner_tab import RunnerTab
 from ui.targets_tab import TargetsTab
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = application_base_dir()
 AUTOMATIONS_DIR = BASE_DIR / "automations"
 TARGETS_DIR = BASE_DIR / "targets"
 RULES_DIR = BASE_DIR / "rules"
@@ -307,7 +308,10 @@ class FlowDeskWindow(QMainWindow):
         )
         self.targets_tab = TargetsTab(TARGETS_DIR, parent_window=self)
         self.runner_tab = RunnerTab(AUTOMATIONS_DIR, RULES_DIR, TARGETS_DIR, LOGS_DIR)
-        self.import_export_tab = ImportExportTab(AUTOMATIONS_DIR)
+        self.import_export_tab = ImportExportTab(
+            AUTOMATIONS_DIR, RULES_DIR, TARGETS_DIR,
+            on_import=self._on_config_imported,
+        )
 
         self.tabs.addTab(self.parser_tab, "Parser")
         self.tabs.addTab(self.automations_tab, "Automations")
@@ -317,6 +321,13 @@ class FlowDeskWindow(QMainWindow):
 
         self._setup_emergency_stop()
         self._setup_tray_icon()
+
+    def _on_config_imported(self):
+        """Refresh every tab so newly imported files are visible immediately."""
+        self.automations_tab._refresh_file_list()
+        self.parser_tab._refresh_file_list()
+        self.targets_tab.refresh()
+        self.runner_tab._refresh_combos()
 
     def _setup_emergency_stop(self):
         shortcut = QShortcut(QKeySequence("Ctrl+Shift+Q"), self)

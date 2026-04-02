@@ -24,6 +24,7 @@ class AutomationRunner(QThread):
     step_completed = pyqtSignal(int, int, str, str)  # record_idx, step_idx, status, msg
     run_finished = pyqtSignal(int, int)               # success_count, fail_count
     log_message = pyqtSignal(str)                      # timestamped log line
+    step_progress = pyqtSignal(str, str)               # phase, message
 
     def __init__(
         self,
@@ -77,10 +78,13 @@ class AutomationRunner(QThread):
                 if self._stop_flag:
                     break
 
+                t0 = time.perf_counter()
                 status, msg = self._execute_step(step, record)
+                elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
                 self.step_completed.emit(rec_idx, step_idx, status, msg)
                 self._log(f"  Step {step_idx + 1}: {step.get('action', '?')} -> {status}"
+                          f" ({elapsed_ms} ms)"
                           f"{' (' + msg + ')' if msg else ''}")
 
                 if status == "ok":
@@ -106,37 +110,51 @@ class AutomationRunner(QThread):
 
         try:
             if action == "move_to_image":
-                return self._execute_click_image(step)
+                result = self._execute_click_image(step)
+                self.step_progress.emit("done", "Moved to target")
+                return result
 
             elif action == "type_value":
                 value = self._inject_variables(step.get("value", ""), record)
+                self.step_progress.emit("search", f"Typing '{value[:30]}'")
                 screen.type_value(value)
+                self.step_progress.emit("done", "Typed")
                 return "ok", f"typed '{value[:40]}'"
 
             elif action == "move_to_text":
-                return self._execute_search_by_text(step, record)
+                result = self._execute_search_by_text(step, record)
+                self.step_progress.emit("done", "Moved to text")
+                return result
 
             elif action == "simple_click":
                 button = step.get("button", "left")
                 clicks = int(step.get("clicks", 1))
+                self.step_progress.emit("search", "Clicking")
                 screen.simple_click(button=button, clicks=clicks)
+                self.step_progress.emit("done", "Clicked")
                 return "ok", f"{button} click" + (f" x{clicks}" if clicks > 1 else "")
 
             elif action == "sleep":
                 sec = max(0.0, float(step.get("seconds", 0)))
+                self.step_progress.emit("search", f"Waiting {sec:.1f}s")
                 time.sleep(sec)
+                self.step_progress.emit("done", f"Waited {sec:.1f}s")
                 return "ok", f"sleep {sec:.2f}s"
 
             else:
                 return "skip", f"unknown action '{action}'"
 
         except screen.TargetNotFoundError as e:
+            self.step_progress.emit("error", str(e))
             return "fail", str(e)
         except screen.TextNotFoundError as e:
+            self.step_progress.emit("error", str(e))
             return "fail", str(e)
         except screen.TesseractMissingError as e:
+            self.step_progress.emit("error", str(e))
             return "fail", str(e)
         except Exception as e:
+            self.step_progress.emit("error", f"{type(e).__name__}: {e}")
             return "fail", f"{type(e).__name__}: {e}"
 
     def _execute_click_image(self, step: dict) -> tuple[str, str]:
@@ -148,6 +166,7 @@ class AutomationRunner(QThread):
         timeout = step.get("timeout", 0)
         move_duration = float(step.get("move_duration", 0))
         suffix = f" offset({ox},{oy})" if ox or oy else ""
+        label = Path(target).name
 
         coords = screen.click_image(
             target,
@@ -156,8 +175,10 @@ class AutomationRunner(QThread):
             offset_x=ox,
             offset_y=oy,
             move_duration=move_duration,
+            on_search_begin=lambda: self.step_progress.emit("search", f"Looking for {label}"),
+            on_found=lambda: self.step_progress.emit("found", f"Found {label}"),
         )
-        return "ok", f"moved to {Path(target).name}{suffix} at ({coords[0]},{coords[1]})"
+        return "ok", f"moved to {label}{suffix} at ({coords[0]},{coords[1]})"
 
     def _execute_search_by_text(self, step: dict, record: dict) -> tuple[str, str]:
         """OCR-search for text on screen (full desktop by default) and move the mouse."""
@@ -171,6 +192,7 @@ class AutomationRunner(QThread):
         case_sensitive = step.get("case_sensitive", False)
         timeout = step.get("timeout", 10)
         move_duration = float(step.get("move_duration", 0))
+        snippet = query[:30]
 
         coords = screen.search_text(
             query,
@@ -179,8 +201,10 @@ class AutomationRunner(QThread):
             case_sensitive=case_sensitive,
             timeout=timeout,
             move_duration=move_duration,
+            on_search_begin=lambda: self.step_progress.emit("search", f"Looking for '{snippet}'"),
+            on_found=lambda: self.step_progress.emit("found", f"Found '{snippet}'"),
         )
-        return "ok", f"moved to '{query[:30]}' at ({coords[0]},{coords[1]})"
+        return "ok", f"moved to '{snippet}' at ({coords[0]},{coords[1]})"
 
     def _resolve_target(self, target_name: str) -> str:
         name = str(target_name).strip()
