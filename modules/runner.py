@@ -105,7 +105,7 @@ class AutomationRunner(QThread):
         action = step.get("action", "")
 
         try:
-            if action in ("click_image", "wait_for_image"):
+            if action == "move_to_image":
                 return self._execute_click_image(step)
 
             elif action == "type_value":
@@ -113,7 +113,7 @@ class AutomationRunner(QThread):
                 screen.type_value(value)
                 return "ok", f"typed '{value[:40]}'"
 
-            elif action == "search_by_text":
+            elif action == "move_to_text":
                 return self._execute_search_by_text(step, record)
 
             elif action == "simple_click":
@@ -174,14 +174,21 @@ class AutomationRunner(QThread):
         return "ok", f"moved to '{query[:30]}' at ({coords[0]},{coords[1]})"
 
     def _resolve_target(self, target_name: str) -> str:
-        path = self.targets_dir / target_name
-        if path.exists():
-            return str(path)
-        if not target_name.endswith(".png"):
-            path = self.targets_dir / f"{target_name}.png"
-            if path.exists():
+        name = str(target_name).strip()
+        if not name:
+            raise ValueError("target image is empty; choose a .png in the automation step")
+
+        candidates = [self.targets_dir / name]
+        if not name.lower().endswith(".png"):
+            candidates.append(self.targets_dir / f"{name}.png")
+
+        for path in candidates:
+            if path.exists() and path.is_file():
                 return str(path)
-        return str(self.targets_dir / target_name)
+
+        raise FileNotFoundError(
+            f"target image not found: '{name}' (looked in {self.targets_dir})"
+        )
 
     def _get_confidence(self, step: dict) -> float:
         if "confidence" in step:

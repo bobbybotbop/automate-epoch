@@ -2,12 +2,17 @@
   "name": "test1",
   "steps": [
     {
-      "action": "click_image",
-      "target": "title2.png",
+      "action": "move_to_image",
+      "target": "youtub.png",
       "confidence": 0.85,
       "offset_x": 0,
-      "offset_y": 30,
-      "loop_variable": "customer_name"
+      "offset_y": 0,
+      "timeout": 0
+    },
+    {
+      "action": "simple_click",
+      "button": "left",
+      "clicks": 1
     }
   ]
 }

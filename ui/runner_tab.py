@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -15,12 +16,23 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from modules.parser import load_rules, parse_pdf
 from modules.runner import AutomationRunner, load_automation, load_confidence_meta
+
+
+def _automation_uses_variables(automation: dict) -> bool:
+    """Return True if any step contains a ``{{variable}}`` placeholder."""
+    pattern = re.compile(r"\{\{\w+\}\}")
+    for step in automation.get("steps", []):
+        for key in ("value", "query"):
+            if pattern.search(step.get(key, "")):
+                return True
+    return False
 
 
 class RunnerTab(QWidget):
@@ -88,6 +100,19 @@ class RunnerTab(QWidget):
         delay_row.addWidget(self.delay_label)
         root.addLayout(delay_row)
 
+        # --- Repeat count (used when running without PDF/rules) ---
+        repeat_row = QHBoxLayout()
+        repeat_row.addWidget(QLabel("Repeat Count:"))
+        self.spin_repeat = QSpinBox()
+        self.spin_repeat.setRange(1, 9999)
+        self.spin_repeat.setValue(1)
+        self.spin_repeat.setToolTip(
+            "Number of times to run the automation when no PDF is loaded"
+        )
+        repeat_row.addWidget(self.spin_repeat)
+        repeat_row.addStretch()
+        root.addLayout(repeat_row)
+
         # --- Control buttons ---
         btn_row = QHBoxLayout()
         self.btn_run = QPushButton("Run")
@@ -151,27 +176,41 @@ class RunnerTab(QWidget):
         if not auto_path:
             QMessageBox.warning(self, "Missing", "Select an automation.")
             return
-        if not rules_path:
-            QMessageBox.warning(self, "Missing", "Select a rule set.")
-            return
-        if not self._pdf_path:
-            QMessageBox.warning(self, "Missing", "Load a PDF file.")
-            return
 
         try:
             automation = load_automation(auto_path)
-            rules = load_rules(rules_path)
-            parsed = parse_pdf(self._pdf_path, rules)
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
             return
 
-        if not parsed:
-            QMessageBox.warning(self, "No Data", "PDF parsing returned no records.")
-            return
+        needs_parser = _automation_uses_variables(automation)
 
-        self.log_view.clear()
-        self._append_log(f"Loaded {len(parsed)} record(s) from PDF.")
+        if needs_parser:
+            if not rules_path:
+                QMessageBox.warning(self, "Missing",
+                    "This automation uses {{variables}} — select a rule set.")
+                return
+            if not self._pdf_path:
+                QMessageBox.warning(self, "Missing",
+                    "This automation uses {{variables}} — load a PDF file.")
+                return
+            try:
+                rules = load_rules(rules_path)
+                parsed = parse_pdf(self._pdf_path, rules)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", str(e))
+                return
+            if not parsed:
+                QMessageBox.warning(self, "No Data",
+                    "PDF parsing returned no records.")
+                return
+            self.log_view.clear()
+            self._append_log(f"Loaded {len(parsed)} record(s) from PDF.")
+        else:
+            repeat = self.spin_repeat.value()
+            parsed = [{}] * repeat
+            self.log_view.clear()
+            self._append_log(f"No variables detected — running {repeat} iteration(s).")
 
         meta = load_confidence_meta(self.targets_dir)
         delay = self.delay_slider.value() / 10.0

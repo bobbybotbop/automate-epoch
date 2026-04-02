@@ -81,6 +81,33 @@ LOGS_DIR = BASE_DIR / "logs"
 for d in (AUTOMATIONS_DIR, TARGETS_DIR, RULES_DIR, LOGS_DIR):
     d.mkdir(exist_ok=True)
 
+
+def _migrate_automation_actions(automations_dir: Path) -> None:
+    """One-time idempotent rewrite of legacy action names in automation files."""
+    renames = {
+        "click_image": "move_to_image",
+        "wait_for_image": "move_to_image",
+        "search_by_text": "move_to_text",
+    }
+    import json as _json
+
+    for path in automations_dir.glob("*.json"):
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, _json.JSONDecodeError):
+            continue
+        changed = False
+        for step in data.get("steps", []):
+            old = step.get("action", "")
+            if old in renames:
+                step["action"] = renames[old]
+                changed = True
+        if changed:
+            path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+
+
+_migrate_automation_actions(AUTOMATIONS_DIR)
+
 DARK_STYLESHEET = """
 QWidget {
     background-color: #1e1e2e;

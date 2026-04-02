@@ -28,15 +28,15 @@ from PyQt6.QtWidgets import (
 import pygetwindow as gw
 
 ACTION_TYPES = [
-    "click_image",
-    "search_by_text",
+    "move_to_image",
+    "move_to_text",
     "simple_click",
     "type_value",
 ]
 
 ACTION_DESCRIPTIONS = {
-    "click_image": "Wait for image & move mouse to it",
-    "search_by_text": "OCR-find text on screen & move mouse",
+    "move_to_image": "Wait for image & move mouse to it",
+    "move_to_text": "OCR-find text on screen & move mouse",
     "simple_click": "Click at current cursor position",
     "type_value": "Type text into focused field",
 }
@@ -200,13 +200,13 @@ class AutomationsTab(QWidget):
         self._editor_simple_click = self._make_simple_click_editor()
         self._editor_type = self._make_type_editor()
 
-        self.editor_stack.addWidget(self._editor_click["widget"])        # 0: click_image
-        self.editor_stack.addWidget(self._editor_search_text["widget"])  # 1: search_by_text
+        self.editor_stack.addWidget(self._editor_click["widget"])        # 0: move_to_image
+        self.editor_stack.addWidget(self._editor_search_text["widget"])  # 1: move_to_text
         self.editor_stack.addWidget(self._editor_simple_click["widget"]) # 2: simple_click
         self.editor_stack.addWidget(self._editor_type["widget"])         # 3: type_value
 
     def _make_click_editor(self) -> dict:
-        """Editor for click_image: wait for target image then move mouse to it."""
+        """Editor for move_to_image: wait for target image then move mouse to it."""
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setContentsMargins(0, 8, 0, 0)
@@ -506,14 +506,14 @@ class AutomationsTab(QWidget):
     @staticmethod
     def _step_summary(step: dict) -> str:
         action = step.get("action", "?")
-        if action in ("click_image", "wait_for_image"):
+        if action == "move_to_image":
             ox, oy = step.get("offset_x", 0), -step.get("offset_y", 0)
             offset = f" +({ox},{oy})" if ox or oy else ""
             return f"move \u2192 {step.get('target', '?')}{offset}"
         if action == "type_value":
             val = step.get("value", "")
             return f"type \u2192 {val[:30]}"
-        if action == "search_by_text":
+        if action == "move_to_text":
             q = step.get("query", "")
             win = step.get("window_title", "")
             win_tag = f" [{win}]" if win else ""
@@ -531,17 +531,15 @@ class AutomationsTab(QWidget):
         if not valid:
             return
         step = steps[row]
-        action = step.get("action", "click_image")
-        if action == "wait_for_image":
-            action = "click_image"
+        action = step.get("action", "move_to_image")
         idx = ACTION_TYPES.index(action) if action in ACTION_TYPES else 0
         self.combo_action.setCurrentIndex(idx)
         self.editor_stack.setCurrentIndex(idx)
         self._load_step_into_editor(step)
 
     def _load_step_into_editor(self, step: dict):
-        action = step.get("action", "click_image")
-        if action in ("click_image", "wait_for_image"):
+        action = step.get("action", "move_to_image")
+        if action == "move_to_image":
             _set_combo(self._editor_click["target"], step.get("target", ""))
             self._editor_click["confidence"].setValue(step.get("confidence", 0.85))
             self._editor_click["offset_x"].setValue(int(step.get("offset_x", 0)))
@@ -549,7 +547,7 @@ class AutomationsTab(QWidget):
             self._editor_click["timeout"].setValue(int(step.get("timeout", 0)))
         elif action == "type_value":
             self._editor_type["value"].setText(step.get("value", ""))
-        elif action == "search_by_text":
+        elif action == "move_to_text":
             self._editor_search_text["query"].setText(step.get("query", ""))
             _set_combo(
                 self._editor_search_text["window_title"],
@@ -574,7 +572,7 @@ class AutomationsTab(QWidget):
         self.editor_stack.setCurrentIndex(idx)
 
     def _add_step(self):
-        new_step = {"action": "click_image", "target": "", "confidence": 0.85}
+        new_step = {"action": "move_to_image", "target": "", "confidence": 0.85}
         self._automation.setdefault("steps", []).append(new_step)
         self._refresh_step_list()
         self.step_list.setCurrentRow(len(self._automation["steps"]) - 1)
@@ -623,7 +621,7 @@ class AutomationsTab(QWidget):
         action = self.combo_action.currentData()
         step: dict = {"action": action}
 
-        if action == "click_image":
+        if action == "move_to_image":
             step["target"] = self._editor_click["target"].currentText()
             step["confidence"] = self._editor_click["confidence"].value()
             step["offset_x"] = self._editor_click["offset_x"].value()
@@ -631,7 +629,7 @@ class AutomationsTab(QWidget):
             step["timeout"] = self._editor_click["timeout"].value()
         elif action == "type_value":
             step["value"] = self._editor_type["value"].text()
-        elif action == "search_by_text":
+        elif action == "move_to_text":
             step["query"] = self._editor_search_text["query"].text()
             wt = self._editor_search_text["window_title"].currentText().strip()
             if wt:
